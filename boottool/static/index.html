@@ -901,7 +901,7 @@ function setTool(t) {
 function renderTabs() {
   const w = $("#plateTabs"); w.innerHTML = ""; if (tool === "convert" || !lastRes || tool === "help") return;
   const mk = (v, l) => { const d = el("div", plateView === v ? "on" : "", l); d.onclick = () => { plateView = v; renderTabs(); run(); }; w.append(d); };
-  mk("all", "All"); lastRes.plates.forEach((p, i) => mk(i, `${i + 1} ${p.name}`));
+  mk("all", "All"); lastRes.plates.forEach((p, i) => mk(i, `${i + 1} ${esc(p.name)}`));
 }
 
 // ---------------------------------------------------------------- loading + running
