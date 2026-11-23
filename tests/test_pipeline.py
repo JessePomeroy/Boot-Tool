@@ -108,6 +108,36 @@ def test_cli_trace(lineart, tmp_path):
     _valid_svg(out.read_text())
 
 
+def test_cli_works_without_an_svg_rasteriser(lineart, tmp_path, monkeypatch):
+    """The self-check is optional on the command line too: no rsvg/cairo means no scores, not a crash."""
+    import boottool.score as sc
+    monkeypatch.setattr(sc.shutil, "which", lambda name: None)
+    monkeypatch.setitem(__import__("sys").modules, "cairosvg", None)
+    runner = CliRunner()
+
+    out = tmp_path / "o.svg"
+    r = runner.invoke(main, ["trace", str(lineart), str(out)])
+    assert r.exit_code == 0, r.output
+    assert "self-check was skipped" in r.output
+    assert json.loads(r.output[r.output.index("{"):])["scores"]["ssim_target"] is None
+    _valid_svg(out.read_text())
+
+    src, dst = tmp_path / "in", tmp_path / "out"
+    src.mkdir()
+    make_lineart(src / "a.png")
+    r = runner.invoke(main, ["run", str(src), str(dst), "--workers", "1"])
+    assert r.exit_code == 0 and "self-check was skipped" in r.output, r.output
+    rec = json.loads((dst / "manifest.jsonl").read_text().splitlines()[0])
+    assert rec["status"] == "ok" and rec["scores"]["ssim_target"] is None
+    _valid_svg((dst / "svg" / "a.svg").read_text())
+    assert "1 skipped" in runner.invoke(main, ["run", str(src), str(dst), "--workers", "1"]).output   # resume still works
+
+    assert runner.invoke(main, ["report", str(dst)]).exit_code == 0
+    r = runner.invoke(main, ["dataset", str(dst)])
+    assert r.exit_code == 0, r.output
+    assert json.loads((dst / "dataset.json").read_text())["excluded"] == {"unscored": 1}   # quality unknown, so left out
+
+
 def test_upscale_and_level(lineart):
     from boottool.preprocess import prepare
     base = prepare(lineart, Params(min_side=1))

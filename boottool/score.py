@@ -52,6 +52,18 @@ def _ssim(a: np.ndarray, b: np.ndarray) -> float:
     return float(structural_similarity(_gray(a), _gray(b), data_range=255, win_size=max(win, 3)))
 
 
+NO_SCORES = {"ssim_target": None, "ssim_source": None, "mae_target": None}
+
+
+def score_or_none(svg_text: str, prep: Prepared) -> dict:
+    """Like score_svg, but the self-check is optional: it needs an SVG rasteriser (rsvg-convert or
+    cairosvg). Without one everything still works; the scores are just None."""
+    try:
+        return score_svg(svg_text, prep)
+    except (RuntimeError, OSError, subprocess.CalledProcessError):
+        return dict(NO_SCORES)
+
+
 def score_svg(svg_text: str, prep: Prepared) -> dict:
     """
     ssim_target : SVG vs the binarized / quantized target. This measures tracing quality

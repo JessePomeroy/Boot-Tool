@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .config import Params
 from .preprocess import prepare
-from .score import score_svg
+from .score import score_or_none
 from .simplify import postprocess, svg_stats
 from .trace import get_tracer
 
@@ -22,7 +22,8 @@ class Result:
 def run_pipeline(path, p: Params | None = None, score: bool = True) -> Result:
     """preprocess -> trace -> simplify -> score for a single image.
 
-    score=False skips the re-render and SSIM step (used by the live UI preview).
+    score=False skips the re-render and SSIM step (used by the live UI preview). The scores are
+    None when no SVG rasteriser is installed.
     """
     p = p or Params()
     prep = prepare(path, p)
@@ -34,5 +35,5 @@ def run_pipeline(path, p: Params | None = None, score: bool = True) -> Result:
         size=prep.size,
         scale=round(prep.scale, 4),
         stats=svg_stats(svg),
-        scores=score_svg(svg, prep) if score else {},
+        scores=score_or_none(svg, prep) if score else {},
     )
