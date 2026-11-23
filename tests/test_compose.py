@@ -201,6 +201,41 @@ def test_compose_send_rename_and_eyedropper(server):
         b.close()
 
 
+def test_renaming_in_the_header_renames_the_library_item(server, lineart):
+    """The header name names the library item. Renaming renames the file and leaves the graphic alone,
+    even on Print (where it used to save the whole print page over the graphic)."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.goto(server + "/")
+        page.set_input_files("#file", str(lineart))
+        page.wait_for_function("libName !== ''", timeout=60000)
+        traced = library.read(page.evaluate("libName"))
+
+        def rename(to):
+            page.click("#nmEdit")                                         # clicking selects the whole name
+            if to is None:
+                page.keyboard.press("Escape")                              # looked at the name, changed nothing
+            else:
+                page.keyboard.type(to)
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(2500)                                    # longer than the delayed save
+
+        rename("my badge")
+        assert [i["name"] for i in library.listing()] == ["my badge.svg"]  # used to stay line.svg
+        page.click('a[data-t="print"]')
+        page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
+        rename(None)
+        rename("final badge")
+        assert [i["name"] for i in library.listing()] == ["final badge.svg"]
+        assert library.read("final badge.svg") == traced                   # still the Convert graphic, not the print page
+        assert not errs, errs
+        b.close()
+
+
 def test_type_on_the_page_layer_thumbnails_and_shortcuts(server):
     sync_api = pytest.importorskip("playwright.sync_api")
     _make_font(fonts.user_folder() / "TestSans.ttf")

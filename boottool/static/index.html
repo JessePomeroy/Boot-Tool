@@ -930,7 +930,7 @@ function setName(n, dim) { $("#nmEdit").textContent = n; if (dim !== undefined) 
   const e = $("#nmEdit"); e.onclick = () => { if (!imageId) return; e.contentEditable = "plaintext-only"; e.focus(); const r = document.createRange(); r.selectNodeContents(e); const g = getSelection(); g.removeAllRanges(); g.addRange(r); };
   const done = ok => {
     e.contentEditable = "false"; const v = e.textContent.replace(/[\\/:*?"<>|\n]/g, "").trim().slice(0, 80);
-    if (ok && v) { fileName = v; if (libName) saveToLibrary(); } e.textContent = fileName;
+    if (ok && v && v !== fileName) { fileName = v; if (libName) renameInLibrary(v); } e.textContent = fileName;
   };
   e.onblur = () => done(true); e.onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); e.blur(); } else if (ev.key === "Escape") { e.textContent = fileName; e.blur(); } ev.stopPropagation(); };
 })();
@@ -967,6 +967,13 @@ const kb = b => b > 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.round(b / 1e3) + "
 function renderStatsBack() { if (lastShown) show(lastShown); }
 let lastShown = null;
 let libTimer = null, libName = "";
+async function renameInLibrary(to) {                 // the library item takes the new name; its graphic is left as it is
+  try {
+    const r = await fetch("/api/library/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: libName, to})});
+    const j = await r.json(); if (!r.ok) throw new Error(j.error); libName = j.name;
+    const c = $("#libcell"); if (c) { c.textContent = "Saved as " + j.name; c.title = j.name; }
+  } catch (e) { libName = ""; }                       // removed from the library meanwhile: the next result is saved under the new name
+}
 function saveToLibrary() {
   clearTimeout(libTimer); const id = imageId, name = fileName, svg = svgText;
   libTimer = setTimeout(async () => {
