@@ -1,4 +1,5 @@
 import json
+import re
 
 import numpy as np
 import pytest
@@ -274,3 +275,25 @@ def test_dark_underbase_is_a_first_plate_for_coloured_ink_only(tmp_path):
     j = pr.build(f, pr.PrintParams(method="spot", kind="flat", inks=2, dark=True, dark_invert=True, underbase=True), page)
     assert j.plates[0].name == "White underbase"
     assert "#1b1b1d" in pg.compose(j, "all")                           # the preview shows the garment colour
+
+
+def _ink_box(plate):
+    """Where a plate's ink sits on the page, in mm: (left, top, right, bottom)."""
+    tx, ty, sx, sy = re.search(r"translate\(([\d.]+) ([\d.]+)\) scale\(([\d.]+) ?([\d.]*)\)", plate.body).groups()
+    tx, ty, sx, sy = float(tx), float(ty), float(sx), float(sy or sx)
+    d = re.search(r' d="([^"]+)"', plate.body).group(1)
+    runs = np.array(re.findall(r"M(\d+) (\d+)h(\d+)v1", d), float)              # dither: one rectangle per run of ink
+    if len(runs):
+        x0, y0, x1, y1 = runs[:, 0].min(), runs[:, 1].min(), (runs[:, 0] + runs[:, 2]).max(), runs[:, 1].max() + 1
+    else:                                                                        # screen: traced outlines
+        xy = np.array(re.findall(r"(-?[\d.]+) (-?[\d.]+)", d), float)
+        x0, y0, x1, y1 = xy[:, 0].min(), xy[:, 1].min(), xy[:, 0].max(), xy[:, 1].max()
+    return tx + x0 * sx, ty + y0 * sy, tx + x1 * sx, ty + y1 * sy
+
+
+@pytest.mark.parametrize("render", ["dither", "screen"])
+def test_dark_underbase_sits_under_the_ink_when_the_picture_is_small(tmp_path, render):
+    f = _bolt(tmp_path / "b.png")                                      # 400 px wide: fewer pixels than the plate is drawn with
+    j = pr.build(f, pr.PrintParams(method="one", ink="#e436a0", render=render, dark=True, underbase=True), pg.PageOpts())
+    under, ink = _ink_box(j.plates[0]), _ink_box(j.plates[1])
+    assert all(abs(u - i) < 1.5 for u, i in zip(under, ink)), (under, ink)   # same place, same size (it is pulled in 0.25 mm)

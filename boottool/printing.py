@@ -445,7 +445,7 @@ def _plate_specs(rgb: np.ndarray, p: PrintParams, W: int, H: int, aw: float = 0.
             g = cv2.LUT(g, lut)
         plane = 1 - g.astype(np.float32) / 255
         if p.dark and aw:
-            mm_px = aw / W
+            mm_px = aw / work.shape[1]              # the plane keeps the picture's own pixels when it has fewer than the plate
             if p.dark_invert:
                 region = _design_region(plane, mm_px, p.outline_mm)
                 plane = (1 - plane) * cv2.GaussianBlur(region.astype(np.float32), (0, 0), 0.6)
@@ -608,7 +608,7 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
         name, ink, ang = specs[i]
         t = ht._tone(np.clip(_to_grid(plane(i), W, H, p.smoothing), 0, 1), p)
         if specs[i][0] == "White underbase":                       # a solid, never screened
-            t = np.where(plane(i) > 0.5, 1.0, 0.0).astype(np.float32)
+            t = np.where(_to_grid(plane(i), W, H, 0) > 0.5, 1.0, 0.0).astype(np.float32)
         if p.render == "screen":
             d = mask_to_path(ht._screen(t, cell_px, ang, table, p.shape, stamp), tp, fast=p.draft)
             body = (f'<g transform="translate({ax:.3f} {ay:.3f}) scale({px_mm:.6f})">'
