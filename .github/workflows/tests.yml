@@ -30,9 +30,14 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-ucrt-x86_64-librsvg
-          echo "C:\msys64\ucrt64\bin" >> $env:GITHUB_PATH
           C:\msys64\ucrt64\bin\rsvg-convert.exe --version
       - run: pip install -e ".[dev]" playwright
       - name: Browser for the interface tests
         run: python -m playwright install --with-deps chromium
       - run: pytest -q
+        if: runner.os != 'Windows'
+      - name: pytest (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:PATH;C:\msys64\ucrt64\bin"    # last, so MSYS2's own Python never replaces ours
+          pytest -q
