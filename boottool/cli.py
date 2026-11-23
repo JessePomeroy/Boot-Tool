@@ -16,6 +16,8 @@ from .manifest import Manifest, latest_by_source, load_provenance, sha256_file
 from .pipeline import run_pipeline
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+NO_CHECK = ("Note: the self-check was skipped because no SVG rasteriser was found. The SVGs are fine; "
+            "to get scores, install librsvg (rsvg-convert) or `pip install cairosvg`.")
 
 _PARAM_OPTIONS = [
     click.option("--mode", type=click.Choice(["auto", "lineart", "color"]), default="auto",
@@ -95,6 +97,8 @@ def trace(src, dst, **kw):
     res = run_pipeline(src, p)
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     Path(dst).write_text(res.svg, encoding="utf-8")
+    if res.scores.get("ssim_target") is None:
+        click.echo(NO_CHECK, err=True)
     click.echo(json.dumps(
         {"mode": res.mode, "size": res.size, "stats": res.stats, "scores": res.scores}, indent=2
     ))
@@ -116,11 +120,12 @@ def _work(args: tuple) -> dict:
         res = run_pipeline(src, p)
         Path(out_svg).parent.mkdir(parents=True, exist_ok=True)
         Path(out_svg).write_text(res.svg, encoding="utf-8")
+        score = res.scores["ssim_target"]                    # None when the self-check could not run
         rec.update(
             svg="svg/" + Path(rel).with_suffix(".svg").as_posix(),
             mode=res.mode, size=list(res.size), scale=res.scale,
             stats=res.stats, scores=res.scores,
-            status="ok" if res.scores["ssim_target"] >= p.min_score else "low_score",
+            status="ok" if score is None or score >= p.min_score else "low_score",
         )
     except Exception as e:  # noqa: BLE001 - one bad file must not stop a batch
         rec.update(status="error", error=f"{type(e).__name__}: {e}")
@@ -162,11 +167,15 @@ def run(input_dir, out_dir, prov_csv, default_license, workers, force, **kw):
 
     click.echo(f"{len(files)} images found, {skipped} skipped (already done), {len(jobs)} to process")
     counts: Counter = Counter()
+    unchecked = [0]
 
     def handle(i, rec):
         manifest.append(rec)
         counts[rec["status"]] += 1
-        score = rec.get("scores", {}).get("ssim_target", "-")
+        score = rec.get("scores", {}).get("ssim_target")
+        if score is None:
+            score = "-"
+            unchecked[0] += rec["status"] != "error"
         click.echo(f"[{i}/{len(jobs)}] {rec['source']}  {rec['status']}  ssim={score}"
                    + (f"  {rec['error']}" if rec["status"] == "error" else ""))
 
@@ -180,6 +189,8 @@ def run(input_dir, out_dir, prov_csv, default_license, workers, force, **kw):
 
     click.echo("done: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) if counts
                else "nothing new to process")
+    if unchecked[0]:
+        click.echo(NO_CHECK, err=True)
 
 
 # --------------------------------------------------------------------------- report
@@ -190,7 +201,7 @@ def report(out_dir):
     """Write report.html: source vs SVG side by side, worst scores first."""
     out_root = Path(out_dir)
     recs = [r for r in latest_by_source(Manifest(out_root / "manifest.jsonl").load())]
-    recs.sort(key=lambda r: r.get("scores", {}).get("ssim_target", -1))
+    recs.sort(key=lambda r: -1 if r.get("scores", {}).get("ssim_target") is None else r["scores"]["ssim_target"])
     rows = []
     for r in recs:
         sc = r.get("scores", {})
@@ -201,7 +212,7 @@ def report(out_dir):
             f"<td><img src='{html.escape(src_uri)}' width=220></td>"
             f"<td>{'<img src=' + repr(html.escape(svg_rel)) + ' width=220>' if r['status'] != 'error' else ''}</td>"
             f"<td>{html.escape(r['source'])}<br>status: <b>{r['status']}</b><br>"
-            f"ssim_target: {sc.get('ssim_target', '-')}<br>"
+            f"ssim_target: {'-' if sc.get('ssim_target') is None else sc['ssim_target']}<br>"
             f"paths: {r.get('stats', {}).get('path_count', '-')} "
             f"nodes: {r.get('stats', {}).get('node_count', '-')}<br>"
             f"licence: {html.escape(r.get('provenance', {}).get('license', '') or 'MISSING')}"
@@ -234,6 +245,8 @@ def dataset(out_dir, min_score, max_paths, val_frac, require_provenance):
     for r in recs:
         if r["status"] == "error":
             excluded["error"] += 1
+        elif r["scores"]["ssim_target"] is None:
+            excluded["unscored"] += 1
         elif r["scores"]["ssim_target"] < min_score:
             excluded["low_score"] += 1
         elif r["stats"]["path_count"] > max_paths:

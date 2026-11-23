@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
-import subprocess
 import threading
 import time
 import uuid
@@ -32,7 +31,7 @@ from . import separate as sep
 from .config import Params
 from .page import coerce_page, compose, layered_svg, plates_zip
 from .preprocess import prepare
-from .score import score_svg
+from .score import score_or_none
 from .simplify import postprocess, svg_stats
 from .trace import get_tracer
 
@@ -205,10 +204,7 @@ def download_response(engine: "Engine", req: dict):
 
 def _scores(svg, prep) -> dict:
     """The self-check needs an SVG rasteriser (rsvg-convert or cairosvg). Without one the tool still works; the check is just skipped."""
-    try:
-        return score_svg(svg, prep)
-    except (RuntimeError, OSError, subprocess.CalledProcessError):
-        return {"ssim_target": None, "ssim_source": None, "mae_target": None}
+    return score_or_none(svg, prep)
 
 
 def design_response(engine: "Engine", req: dict) -> dict:
