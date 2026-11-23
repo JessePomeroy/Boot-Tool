@@ -1,0 +1,43 @@
+name: Tests
+
+# Runs the tests on Windows, Mac and Linux: for every pull request, every push to a branch,
+# and before every release (Build downloads calls this first).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: SVG rasteriser for the self-check (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y librsvg2-bin
+      - name: SVG rasteriser for the self-check (Mac)
+        if: runner.os == 'macOS'
+        run: brew install librsvg
+      - name: SVG rasteriser for the self-check (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-ucrt-x86_64-librsvg
+          C:\msys64\ucrt64\bin\rsvg-convert.exe --version
+      - run: pip install -e ".[dev]" playwright
+      - name: Browser for the interface tests
+        run: python -m playwright install --with-deps chromium
+      - run: pytest -q
+        if: runner.os != 'Windows'
+      - name: pytest (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:PATH;C:\msys64\ucrt64\bin"    # last, so MSYS2's own Python never replaces ours
+          pytest -q

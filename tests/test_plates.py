@@ -73,7 +73,7 @@ def test_halftone_ink_area_follows_tone(tmp_path):
     ramp = np.tile(np.linspace(255, 0, 400, dtype=np.uint8), (200, 1))
     Image.fromarray(ramp).save(tmp_path / "ramp.png")
     job = ht.build(tmp_path / "ramp.png", ht.HalftoneParams(auto_levels=False, lpi=20), pg.PageOpts())
-    (tmp_path / "r.svg").write_text(pg.compose(job, 0))
+    (tmp_path / "r.svg").write_text(pg.compose(job, 0), encoding="utf-8")   # the plate label has a "—"
     subprocess.run(["rsvg-convert", "-w", "1200", "-b", "white", "-o", str(tmp_path / "r.png"), str(tmp_path / "r.svg")], check=True)
     img = np.array(Image.open(tmp_path / "r.png").convert("L")) < 128
     k = 1200 / job.page[0]
