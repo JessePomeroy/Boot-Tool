@@ -1026,7 +1026,7 @@ $("#dl").onclick = () => { const a = document.createElement("a"); a.href = svgUR
 function setMode(m) {
   const was = mode === "batch"; mode = m; document.querySelectorAll("#toolbar [data-m]").forEach(b => b.classList.toggle("on", b.dataset.m === m));
   $("#batch").style.display = m === "batch" ? "flex" : "none";
-  if (was !== (m === "batch")) { renderSide(); if (m !== "batch") renderStatsBack(); }
+  if (was !== (m === "batch") && tool === "convert") { renderSide(); if (m !== "batch") renderStatsBack(); }   // other tabs draw their own panel
   if (m === "batch") { bindConvert(); renderBatch(); $("#bar").style.display = "none"; return; }
   $("#orig").style.display = m === "svg" ? "none" : "block"; $("#svgimg").style.display = m === "orig" ? "none" : "block";
   $("#svgimg").style.opacity = m === "overlay" ? $("#ovo").value / 100 : 1; $("#bar").style.display = m === "split" ? "block" : "none";

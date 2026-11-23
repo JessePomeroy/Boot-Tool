@@ -146,6 +146,28 @@ def test_batch_results_also_land_in_the_library(server, lineart):
     assert any(i["name"].startswith("plate one") for i in library.listing())
 
 
+@pytest.mark.parametrize("target", ["compose", "print", "simulate", "help"])
+def test_leaving_the_batch_view_for_another_tab(server, lineart, target):
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.goto(server + "/")
+        page.set_input_files("#file", str(lineart))
+        page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)
+        page.click("#toolbar [data-m=batch]")
+        page.click(f'a[data-t="{target}"]')
+        page.wait_for_timeout(1000)
+        assert not errs, errs
+        assert page.evaluate("document.querySelector('#side').innerText.trim()")          # the new tab drew its panel
+        page.click('a[data-t="convert"]')                                                    # and Convert still works afterwards
+        page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)
+        assert not errs, errs
+        b.close()
+
+
 def test_compose_in_the_browser(server):
     sync_api = pytest.importorskip("playwright.sync_api")
     library.save("badge", '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">'
