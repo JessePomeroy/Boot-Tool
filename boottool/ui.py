@@ -5,6 +5,7 @@ Standard library only. Binds to 127.0.0.1, so nothing leaves your machine.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import subprocess
 import threading
@@ -366,13 +367,36 @@ def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServe
             except Exception as e:  # noqa: BLE001
                 self._json(500, {"error": f"{type(e).__name__}: {e}"})
 
-    return ThreadingHTTPServer((host, port), Handler)
+    class Server(ThreadingHTTPServer):
+        def server_close(self):
+            """Also delete this session's temporary folder (uploaded images, batch results)."""
+            super().server_close()
+            shutil.rmtree(engine.dir, ignore_errors=True)
+
+    return Server((host, port), Handler)
+
+
+def stop_on_close() -> None:
+    """Closing the terminal window (SIGHUP) or a normal stop request (SIGTERM) ends the tool the same
+    way Ctrl+C does, so it still tidies up after itself. Not available on Windows."""
+    import signal
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, stop)
+            except (ValueError, OSError):       # not the main thread, or not allowed here
+                pass
 
 
 def serve(port: int = 8765, open_browser: bool = True) -> None:
     srv = make_server("127.0.0.1", port)
+    stop_on_close()
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
-    print(f"boottool UI running at {url}\nPress Ctrl+C to stop.")
+    print(f"boottool UI running at {url}\nPress Ctrl+C to stop.", flush=True)
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:

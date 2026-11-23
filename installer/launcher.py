@@ -3,7 +3,7 @@ import sys
 import threading
 import webbrowser
 
-from boottool.ui import make_server
+from boottool.ui import make_server, stop_on_close
 
 
 def main() -> None:
@@ -11,6 +11,7 @@ def main() -> None:
         srv = make_server("127.0.0.1", 8765)
     except OSError:                                    # 8765 is busy (Boot Tool may already be open): take any free port
         srv = make_server("127.0.0.1", 0)
+    stop_on_close()                                    # closing the Terminal window still tidies up (Mac)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     print("=" * 56)
     print("  BOOT TOOL is running.")

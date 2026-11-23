@@ -74,3 +74,45 @@ def test_trace_works_without_an_svg_rasteriser(server, lineart, monkeypatch):
     image_id = json.loads(body)["id"]
     code, body = _post(server + "/api/trace", json.dumps({"id": image_id, "session": "n", "seq": 1, "params": {}}).encode(), "application/json")
     assert code == 200 and json.loads(body)["scores"]["ssim_target"] is None
+
+
+def test_temporary_folder_is_removed_when_the_tool_stops(lineart):
+    import tempfile
+    from pathlib import Path
+    before = set(Path(tempfile.gettempdir()).glob("boottool-ui-*"))
+    srv = make_server("127.0.0.1", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    assert _post(url + "/api/upload", lineart.read_bytes())[0] == 200
+    (folder,) = set(Path(tempfile.gettempdir()).glob("boottool-ui-*")) - before
+    assert any(folder.iterdir())                                        # the uploaded picture is kept while it runs
+    srv.shutdown()
+    srv.server_close()
+    assert not folder.exists()
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="Mac and Linux only")
+@pytest.mark.parametrize("how", ["SIGTERM", "SIGHUP"])
+def test_closing_the_terminal_also_removes_the_temporary_folder(lineart, tmp_path, how):
+    """SIGHUP is what closing the Terminal window sends; SIGTERM is an ordinary stop request."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    from pathlib import Path
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    env = {**os.environ, "TMPDIR": str(tmp), "TMP": str(tmp), "TEMP": str(tmp)}
+    proc = subprocess.Popen([sys.executable, "-u", "-m", "boottool", "ui", "--no-browser", "--port", "0"],
+                            stdout=subprocess.PIPE, text=True, env=env)
+    try:
+        url = proc.stdout.readline().split("at ", 1)[1].strip().rstrip("/")
+        assert _post(url + "/api/upload", lineart.read_bytes())[0] == 200
+        (folder,) = Path(tmp).glob("boottool-ui-*")
+        proc.send_signal(getattr(signal, how))
+        assert proc.wait(timeout=20) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert not folder.exists()
+
