@@ -944,7 +944,7 @@ const Compose = (() => {
   function propsBox() {
     if (!S.sel.length) return null;
     const b = el("div", "box"), kinds = [...new Set(S.sel.map(kindOf))];
-    b.append(el("div", "bh", S.sel.length === 1 ? ((S.sel[0].data && S.sel[0].data.name) || "Selected") : `${S.sel.length} selected`));
+    b.append(el("div", "bh", S.sel.length === 1 ? esc((S.sel[0].data && S.sel[0].data.name) || "Selected") : `${S.sel.length} selected`));   // names come from file names and typed text
     const c = el("div", "cell"), bb = selBounds();
     const mk = (k, l, f) => { const r = field(l, fu(bb[k === "w" ? "width" : k === "h" ? "height" : k]), f); propEls[k] = r._i; return r; };
     const now = () => selBounds() || bb;                     // the selection may have moved since this panel was drawn

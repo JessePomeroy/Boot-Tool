@@ -332,6 +332,27 @@ def test_type_on_the_page_layer_thumbnails_and_shortcuts(server):
         b.close()
 
 
+def test_names_with_html_are_shown_as_text(server):
+    """A graphic's name comes from its file name; it must be shown as written, never run as part of the page."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    name = "<img src=x onerror=window.__ran=1>"     # not a valid Windows file name, so it is handed to the browser directly
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.goto(server + "/")
+        page.click('a[data-t="compose"]')
+        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+        page.set_input_files("#cfile", {"name": name + ".svg", "mimeType": "image/svg+xml", "buffer": SVG.encode()})
+        page.wait_for_function("Compose._S.sel.length === 1")
+        page.wait_for_timeout(300)
+        assert not page.evaluate("window.__ran === 1")
+        assert name in page.evaluate("[...document.querySelectorAll('#side .bh')].map(e => e.textContent)")
+        assert not errs, errs
+        b.close()
+
+
 def test_groups_and_fill_tool_in_the_browser(server):
     sync_api = pytest.importorskip("playwright.sync_api")
     ring = '<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60"><path fill-rule="evenodd" d="M5 5H55V55H5ZM15 15V45H45V15Z"/></svg>'
