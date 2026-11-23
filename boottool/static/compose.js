@@ -517,7 +517,7 @@ const Compose = (() => {
   // ------------------------------------------------------------------ transforms by number / buttons
   function setBounds(x, y, w, h) {
     const b = selBounds(); if (!b) return;
-    const sx = Math.max(w, 0.01) / b.width, sy = Math.max(h, 0.01) / b.height;
+    const sx = b.width ? Math.max(w, 0.01) / b.width : 1, sy = b.height ? Math.max(h, 0.01) / b.height : 1;   // a flat line keeps its zero side
     const anyText = S.sel.some(i => kindOf(i) === "text");
     const k = anyText ? sx : null;
     for (const it of S.sel) { it.scale(k || sx, k || sy, b.topLeft); if (kindOf(it) === "text") it.data.text.size *= sx; }
@@ -697,7 +697,7 @@ const Compose = (() => {
         for (const my of [nb.top, nb.center.y, nb.bottom]) for (const gy of ys) if (Math.abs(my - gy) < th && !sy) { sy = gy - my; d.guides.push([new paper.Point(-50, gy), new paper.Point(S.W + 50, gy)]); }
       }
       const want = d.b0.point.add(tot).add([sx, sy]), cur = selBounds().point, dl = want.subtract(cur);
-      for (const it of S.sel) it.translate(dl); drawUI();
+      for (const it of S.sel) it.translate(dl); drawUI(); syncProps();
     } else if (d.type === "scale") {
       const b = d.b0, {ix, iy} = d, ax = ix < 0 ? b.right : ix > 0 ? b.left : b.center.x, ay = iy < 0 ? b.bottom : iy > 0 ? b.top : b.center.y;
       const hx = ix < 0 ? b.left : ix > 0 ? b.right : b.center.x, hy = iy < 0 ? b.top : iy > 0 ? b.bottom : b.center.y;
@@ -946,9 +946,11 @@ const Compose = (() => {
     b.append(el("div", "bh", S.sel.length === 1 ? ((S.sel[0].data && S.sel[0].data.name) || "Selected") : `${S.sel.length} selected`));
     const c = el("div", "cell"), bb = selBounds();
     const mk = (k, l, f) => { const r = field(l, fu(bb[k === "w" ? "width" : k === "h" ? "height" : k]), f); propEls[k] = r._i; return r; };
-    c.append(mk("x", "X", v => setBounds(tu(v), bb.y, bb.width, bb.height)), mk("y", "Y", v => setBounds(bb.x, tu(v), bb.width, bb.height)),
-      mk("w", "Width", v => { const w = tu(v); setBounds(bb.x, bb.y, w, S.lock ? bb.height * w / bb.width : bb.height); }),
-      mk("h", "Height", v => { const h = tu(v); setBounds(bb.x, bb.y, S.lock ? bb.width * h / bb.height : bb.width, h); }));
+    const now = () => selBounds() || bb;                     // the selection may have moved since this panel was drawn
+    c.append(mk("x", "X", v => { const b = now(); setBounds(tu(v), b.y, b.width, b.height); }),
+      mk("y", "Y", v => { const b = now(); setBounds(b.x, tu(v), b.width, b.height); }),
+      mk("w", "Width", v => { const b = now(), w = tu(v); setBounds(b.x, b.y, w, S.lock && b.width ? b.height * w / b.width : b.height); }),
+      mk("h", "Height", v => { const b = now(), h = tu(v); setBounds(b.x, b.y, S.lock && b.height ? b.width * h / b.height : b.width, h); }));
     const l = el("label", "chk", `<input type="checkbox"><span>Keep proportions</span>`); l.querySelector("input").checked = S.lock; l.querySelector("input").onchange = e => { S.lock = e.target.checked; }; c.append(l);
     c.append(field("Rotate by (°)", "0", v => { rotateSel(+v || 0); renderSide(); }));
     b.append(c);

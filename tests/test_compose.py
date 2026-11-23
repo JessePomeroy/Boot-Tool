@@ -276,3 +276,42 @@ def test_groups_and_fill_tool_in_the_browser(server):
         pg_.wait_for_function("document.querySelector('#toast') && /open to the outside/.test(document.querySelector('#toast').textContent)")
         assert not errors, errors
         b.close()
+
+
+def test_position_and_size_boxes(server):
+    """Typing X then Y moves to both; a flat line survives the boxes; the boxes follow a drag."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.goto(server + "/")
+        page.click('a[data-t="compose"]')
+        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+        bounds = "(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.x, b.y, b.width, b.height].map(v => Math.round(v * 10) / 10); })()"
+        def type_in(label, value):
+            n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", label)   # the artboard has its own Width / Height above
+            assert n >= 0, label
+            i = page.locator(".cell input").nth(n)
+            i.fill(str(value))
+            i.press("Enter")
+
+        page.evaluate("""(() => { const A = Compose._api, L = A.getL();
+          const r = new paper.Path.Rectangle({point: [10, 10], size: [40, 30], fillColor: '#000'}); L.art.addChild(r); A.commit(); A.select([r]); })()""")
+        units = page.evaluate("[...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === 'X').value")
+        k = float(units) / 10                                              # the boxes may show cm or mm
+        type_in("X", 100 * k)
+        type_in("Y", 80 * k)
+        assert page.evaluate(bounds)[:2] == [100, 80]                       # typing Y used to put X back
+        type_in("Width", 60 * k)
+        assert page.evaluate(bounds) == [100, 80, 60, 45]                   # proportions kept, position kept
+
+        page.evaluate("""(() => { const A = Compose._api, L = A.getL(); L.art.removeChildren();
+          const l = new paper.Path.Line({from: [20, 50], to: [120, 50], strokeColor: '#000', strokeWidth: 1}); L.art.addChild(l); A.commit(); A.select([l]); })()""")
+        type_in("X", 30 * k)
+        x, y, w, h = page.evaluate(bounds)
+        assert (x, y, w, h) == (30, 50, 100, 0)                             # a flat line used to vanish (its points became NaN)
+        assert "NaN" not in page.evaluate("Compose._api.svgString()")
+        assert not errs, errs
+        b.close()
