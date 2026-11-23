@@ -1,7 +1,7 @@
 name: Build downloads
 
-# Push a tag such as v0.8.3 (git tag v0.8.3 && git push origin v0.8.3) and the Mac and Windows apps are
-# built and attached to a new Release. "Run workflow" on the Actions page makes test builds without a Release.
+# Push a tag such as v0.8.3 (git tag v0.8.3 && git push origin v0.8.3) and the Mac, Windows and Linux apps are
+# built, started once to check they work, and attached to a new Release. "Run workflow" on the Actions page makes test builds without a Release.
 on:
   push:
     tags: ["v*"]
@@ -20,6 +20,7 @@ jobs:
           - {os: windows-latest, name: Windows}
           - {os: macos-15, name: Mac-AppleSilicon}   # macos-14 is no longer offered by GitHub
           - {os: macos-15-intel, name: Mac-Intel}
+          - {os: ubuntu-22.04, name: Linux}          # an older Ubuntu, so the app also runs on older Linux systems
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +28,8 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install -e . pyinstaller
       - run: pyinstaller --noconfirm installer/BootTool.spec
+      - name: Start the app and use it once
+        run: python installer/smoke_test.py dist/BootTool/BootTool
       - name: Zip (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -34,10 +37,13 @@ jobs:
       - name: Zip (Mac)
         if: runner.os == 'macOS'
         run: cd dist && zip -ry ../BootTool-${{ matrix.name }}.zip BootTool
+      - name: Pack (Linux)
+        if: runner.os == 'Linux'
+        run: cd dist && tar -czf ../BootTool-${{ matrix.name }}.tar.gz BootTool
       - uses: actions/upload-artifact@v4
         with:
           name: BootTool-${{ matrix.name }}
-          path: BootTool-${{ matrix.name }}.zip
+          path: BootTool-${{ matrix.name }}.*
 
   release:
     needs: build
@@ -49,5 +55,7 @@ jobs:
         with: {path: out, merge-multiple: true}
       - uses: softprops/action-gh-release@v2
         with:
-          files: out/*.zip
+          files: |
+            out/*.zip
+            out/*.tar.gz
           generate_release_notes: true
