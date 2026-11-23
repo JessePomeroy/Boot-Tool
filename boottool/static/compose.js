@@ -215,9 +215,10 @@ const Compose = (() => {
     } catch (e) { S.fonts = []; }
   }
   async function outlineText(t) {
-    if (!S.font) throw new Error("No fonts found. Put .ttf or .otf files in " + S.fontsFolder);
+    const font = t.font != null ? t.font : S.font && S.font.id;          // existing text keeps its own font
+    if (font == null) throw new Error("No fonts found. Put .ttf or .otf files in " + S.fontsFolder);
     const r = await fetch("/api/text", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({font: S.font.id, text: t.text, size: t.size, spacing: t.spacing, align: t.align})});
+      body: JSON.stringify({font, text: t.text, size: t.size, spacing: t.spacing, align: t.align})});
     const j = await r.json(); if (!r.ok) throw new Error(j.error); return j;
   }
   async function addText(at) {

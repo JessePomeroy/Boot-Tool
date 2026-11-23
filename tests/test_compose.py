@@ -82,7 +82,7 @@ def test_static_files_are_limited_to_the_known_scripts(server):
     assert _get(server + "/static/../ui.py")[0] == 404 and _get(server + "/static/index.html")[0] == 404
 
 
-def _make_font(path):
+def _make_font(path, family="Test Sans", advance=600):
     from fontTools.fontBuilder import FontBuilder
     from fontTools.pens.ttGlyphPen import TTGlyphPen
     fb = FontBuilder(1000, isTTF=True)
@@ -92,9 +92,9 @@ def _make_font(path):
     pen.moveTo((100, 0)); pen.lineTo((100, 700)); pen.lineTo((500, 700)); pen.lineTo((500, 0)); pen.closePath()
     glyphs = {".notdef": TTGlyphPen(None).glyph(), "A": pen.glyph(), "space": TTGlyphPen(None).glyph()}
     fb.setupGlyf(glyphs)
-    fb.setupHorizontalMetrics({".notdef": (500, 0), "A": (600, 100), "space": (300, 0)})
+    fb.setupHorizontalMetrics({".notdef": (500, 0), "A": (advance, 100), "space": (300, 0)})
     fb.setupHorizontalHeader(ascent=800, descent=-200)
-    fb.setupNameTable({"familyName": "Test Sans", "styleName": "Regular"})
+    fb.setupNameTable({"familyName": family, "styleName": "Regular"})
     fb.setupOS2(sTypoAscender=800, sTypoDescender=-200)
     fb.setupPost()
     fb.save(str(path))
@@ -123,6 +123,42 @@ def test_text_endpoint(server):
     code, j = _post(server + "/api/text", {"font": fid, "text": "AA", "size": 20, "align": "center"})
     assert code == 200 and j["d"].count("M") == 2 and j["w"] > 20
     assert _post(server + "/api/text", {"font": fid, "text": "", "size": 20})[0] == 400
+
+
+def test_edited_text_keeps_its_own_font(server):
+    """Picking a font for new text must not redraw existing text in it; picking a font for selected text does."""
+    _make_font(fonts.user_folder() / "TestSans.ttf")
+    _make_font(fonts.user_folder() / "TestWide.ttf", family="Test Wide", advance=1200)
+    fonts.listing(refresh=True)
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.goto(server + "/")
+        page.click('a[data-t="compose"]')
+        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+        w = page.evaluate("""async () => {
+          const A = Compose._api, S = Compose._S, L = A.getL(), wait = () => new Promise(r => setTimeout(r, 1200));
+          const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
+          const narrow = S.fonts.find(f => f.family === 'Test Sans'), wide = S.fonts.find(f => f.family === 'Test Wide');
+          S.font = narrow; S.text.text = 'AAAA';
+          await A.addText(new paper.Point(20, 20));
+          const t = L.art.lastChild, own = t.bounds.width;
+          S.font = wide;                                   // the font chosen for the NEXT text
+          A.retext(t, {spacing: 0}); await wait();         // then the first text is edited without touching its font
+          const kept = L.art.lastChild.bounds.width;
+          A.select([L.art.lastChild]);
+          return {own, kept, font: L.art.lastChild.data.text.font, narrow: narrow.id, wide: wide.id};
+        }""")
+        assert abs(w["kept"] - w["own"]) < 0.01 and w["font"] == w["narrow"], w      # used to be redrawn in Test Wide
+        page.select_option("#side select", str(w["wide"]))                         # choosing a font for the selected text still works
+        page.wait_for_timeout(1200)
+        wider = page.evaluate("[Compose._api.getL().art.lastChild.bounds.width, Compose._api.getL().art.lastChild.data.text.font]")
+        assert wider[0] > w["own"] * 1.5 and wider[1] == w["wide"], wider
+        assert not errs, errs
+        b.close()
 
 
 def test_custom_page_size():
