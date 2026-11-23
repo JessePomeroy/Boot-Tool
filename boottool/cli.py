@@ -106,8 +106,22 @@ def trace(src, dst, **kw):
 
 # --------------------------------------------------------------------------- run
 
+def svg_names(rels: list[str]) -> dict[str, str]:
+    """Where each input's SVG goes, relative to svg/. Usually a.png -> a.svg, but files that share a
+    name apart from the extension (a.png and a.jpg) keep it, so neither replaces the other:
+    a.png.svg and a.jpg.svg. Names are compared ignoring case, as on Mac and Windows."""
+    key = lambda r: Path(r).with_suffix("").as_posix().lower()
+    count = Counter(key(r) for r in rels)
+    return {r: r + ".svg" if count[key(r)] > 1 else Path(r).with_suffix(".svg").as_posix() for r in rels}
+
+
+def _svg_of(rec: dict) -> str:
+    """The SVG written for a manifest record (older manifests may not say, so work it out as before)."""
+    return rec.get("svg") or "svg/" + Path(rec["source"]).with_suffix(".svg").as_posix()
+
+
 def _work(args: tuple) -> dict:
-    src, rel, out_svg, pdict, prov, sha = args
+    src, rel, out_svg, pdict, prov, sha, svg_rel = args
     p = Params(**pdict)
     rec = {
         "id": sha[:16], "sha256": sha, "source": rel, "source_abs": str(Path(src).resolve()),
@@ -122,7 +136,7 @@ def _work(args: tuple) -> dict:
         Path(out_svg).write_text(res.svg, encoding="utf-8")
         score = res.scores["ssim_target"]                    # None when the self-check could not run
         rec.update(
-            svg="svg/" + Path(rel).with_suffix(".svg").as_posix(),
+            svg="svg/" + svg_rel,
             mode=res.mode, size=list(res.size), scale=res.scale,
             stats=res.stats, scores=res.scores,
             status="ok" if score is None or score >= p.min_score else "low_score",
@@ -152,18 +166,19 @@ def run(input_dir, out_dir, prov_csv, default_license, workers, force, **kw):
     done = set() if force else manifest.done_keys()
 
     files = sorted(f for f in in_root.rglob("*") if f.suffix.lower() in IMG_EXTS and f.is_file())
+    names = svg_names([f.relative_to(in_root).as_posix() for f in files])
     jobs, skipped = [], 0
     for f in files:
         rel = f.relative_to(in_root).as_posix()
         sha = sha256_file(f)
-        out_svg = svg_root / Path(rel).with_suffix(".svg")
+        out_svg = svg_root / names[rel]
         if (sha, p.key()) in done and out_svg.exists():
             skipped += 1
             continue
         prov = dict(prov_map.get(rel, {}))
         if default_license and not prov.get("license"):
             prov["license"] = default_license
-        jobs.append((str(f), rel, str(out_svg), p.to_dict(), prov, sha))
+        jobs.append((str(f), rel, str(out_svg), p.to_dict(), prov, sha, names[rel]))
 
     click.echo(f"{len(files)} images found, {skipped} skipped (already done), {len(jobs)} to process")
     counts: Counter = Counter()
@@ -205,7 +220,7 @@ def report(out_dir):
     rows = []
     for r in recs:
         sc = r.get("scores", {})
-        svg_rel = "svg/" + Path(r["source"]).with_suffix(".svg").as_posix()
+        svg_rel = _svg_of(r)
         src_uri = Path(r["source_abs"]).as_uri()
         rows.append(
             "<tr>"
@@ -257,7 +272,7 @@ def dataset(out_dir, min_score, max_paths, val_frac, require_provenance):
             excluded["duplicate"] += 1
         else:
             seen.add(r["sha256"])
-            svg = "svg/" + Path(r["source"]).with_suffix(".svg").as_posix()
+            svg = _svg_of(r)
             bucket = int(r["sha256"][:8], 16) / 0xFFFFFFFF
             (val if bucket < val_frac else train).append(svg)
     doc = {

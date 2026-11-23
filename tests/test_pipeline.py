@@ -100,6 +100,32 @@ def test_cli_run_resume_report_dataset(tmp_path):
     assert ds["excluded"]["no_provenance"] == 1 and ds["excluded"]["error"] == 1
 
 
+def test_cli_run_keeps_files_that_differ_only_by_extension(tmp_path):
+    """a.png and a.jpg used to both write svg/a.svg, so one silently replaced the other."""
+    from PIL import Image
+    src, out = tmp_path / "in", tmp_path / "out"
+    src.mkdir()
+    make_lineart(src / "a.png")
+    Image.open(make_color(tmp_path / "c.png")).convert("RGB").save(src / "A.jpg")      # same name apart from case and type
+    make_lineart(src / "b.png", invert=True)
+    runner = CliRunner()
+    r = runner.invoke(main, ["run", str(src), str(out), "--workers", "1"])
+    assert r.exit_code == 0, r.output
+    recs = {json.loads(line)["source"]: json.loads(line) for line in (out / "manifest.jsonl").read_text().splitlines()}
+    assert recs["a.png"]["svg"] == "svg/a.png.svg" and recs["A.jpg"]["svg"] == "svg/A.jpg.svg"
+    assert recs["b.png"]["svg"] == "svg/b.svg"                                         # names that do not clash are unchanged
+    assert recs["a.png"]["mode"] == "lineart" and recs["A.jpg"]["mode"] == "color"
+    for rec in recs.values():
+        _valid_svg((out / rec["svg"]).read_text())
+    assert (out / "svg" / "a.png.svg").read_text() != (out / "svg" / "A.jpg.svg").read_text()
+    assert "3 skipped" in runner.invoke(main, ["run", str(src), str(out), "--workers", "1"]).output
+    assert runner.invoke(main, ["report", str(out)]).exit_code == 0
+    page = (out / "report.html").read_text()
+    assert "svg/a.png.svg" in page and "svg/A.jpg.svg" in page
+    assert runner.invoke(main, ["dataset", str(out), "--val-frac", "0", "--min-score", "0"]).exit_code == 0
+    assert sorted(json.loads((out / "dataset.json").read_text())["train"]) == ["svg/A.jpg.svg", "svg/a.png.svg", "svg/b.svg"]
+
+
 def test_cli_trace(lineart, tmp_path):
     out = tmp_path / "o.svg"
     r = CliRunner().invoke(main, ["trace", str(lineart), str(out)])
