@@ -89,6 +89,20 @@ def test_halftone_old_shape_name_still_accepted():
     assert ht.coerce_halftone({"shape": "dot"}).shape == "round"
 
 
+def test_ink_names_with_special_characters_keep_the_files_valid():
+    name = 'Red 5" stripe & <trim>'
+    job = pg.Job(opts=pg.PageOpts(), art=(20, 20, 50, 50),
+                 plates=[pg.Plate(name, "#ff0000", '<rect x="20" y="20" width="50" height="50"/>')])
+    lay = ok(pg.layered_svg(job))                                                  # a double quote used to break this file
+    layer = lay.find("{*}g")
+    assert layer.get("data-name") == name
+    assert layer.get("{http://www.inkscape.org/namespaces/inkscape}label") == "1 " + name
+    assert name.upper() in "".join(lay.itertext())                                 # the printed plate label
+    z = zipfile.ZipFile(io.BytesIO(pg.plates_zip(job)))
+    assert name.upper() in "".join(ok(z.read(z.namelist()[0])).itertext())
+    assert name.upper() in "".join(ok(pg.compose(job, 0)).itertext())
+
+
 def test_separation_plates_layers_and_zip(color):
     job = sep.build(color, sep.SepParams(inks=3), pg.PageOpts())
     assert 1 <= len(job.plates) <= 3 and job.info["paper"]                         # paper never printed

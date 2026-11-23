@@ -117,7 +117,8 @@ def marks_svg(opts: PageOpts) -> str:
 
 
 def _esc(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Safe inside both text and double-quoted attributes (ink names are typed by the user)."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def label_svg(opts: PageOpts, index: int, name: str) -> str:
