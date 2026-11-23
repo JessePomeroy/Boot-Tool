@@ -129,6 +129,29 @@ def test_separation_inks_limit_overrides_and_trap(color):
     assert flat.plates[-1].body == trapped.plates[-1].body                         # darkest plate does not
 
 
+def test_picked_inks_match_every_pixel_to_its_nearest_ink_without_huge_memory(tmp_path):
+    import tracemalloc
+    import numpy as np
+    from PIL import Image
+    from boottool.config import Params
+    rgb = (np.random.default_rng(3).random((400, 600, 3)) * 255).astype(np.uint8)
+    Image.fromarray(rgb).save(tmp_path / "noise.png")
+    inks = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff", "#000000", "#888888", "#ff8800", "#0088ff"]
+    p = Params(min_side=1, max_side=4000)                                           # keep the picture's own size
+    tracemalloc.start()
+    labels, pal, paper = sep._fixed_labels(tmp_path / "noise.png", inks, True, p)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert labels.shape == (400, 600) and len(pal) == 11 and paper == 10
+    import cv2
+    lab = cv2.cvtColor(rgb.astype(np.float32) / 255, cv2.COLOR_RGB2Lab)              # the straightforward way, for comparison
+    cen = cv2.cvtColor(pal[None].astype(np.float32) / 255, cv2.COLOR_RGB2Lab)[0]
+    cen[-1] = np.median(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]), axis=0)
+    want = np.argmin(((lab[:, :, None, :] - cen[None, None]) ** 2).sum(3), axis=2)
+    assert (labels == want).all()
+    assert peak < 20 * labels.nbytes, peak                                           # all inks at once needed about 48x
+
+
 @pytest.fixture
 def server():
     srv = make_server("127.0.0.1", 0)
