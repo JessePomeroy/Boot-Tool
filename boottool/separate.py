@@ -98,8 +98,16 @@ def _fixed_labels(path, colors, want_paper: bool, p: Params):
         med = np.median(border, axis=0)
         paper_rgb = np.clip(cv2.cvtColor(med[None, None].astype(np.float32), cv2.COLOR_Lab2RGB)[0, 0] * 255, 0, 255).astype(np.uint8)
         cen = np.vstack([cen, med]); pal.append(paper_rgb); paper = len(pal) - 1
-    d = ((lab[:, :, None, :] - cen[None, None]) ** 2).sum(3)
-    return np.argmin(d, axis=2).astype(np.int32), np.array(pal, np.uint8), paper
+    # Nearest colour, one colour at a time: comparing them all at once needed a copy of the picture for
+    # every ink (about 1 GB for a 6-megapixel photo with 10 inks). Ties go to the earlier colour, as before.
+    best = np.full(lab.shape[:2], np.inf, np.float32)
+    labels = np.zeros(lab.shape[:2], np.int32)
+    for i, c in enumerate(cen):
+        d = ((lab - c) ** 2).sum(2)
+        closer = d < best
+        best[closer] = d[closer]
+        labels[closer] = i
+    return labels, np.array(pal, np.uint8), paper
 
 
 def build(path, p: SepParams, page: PageOpts) -> Job:
