@@ -25,7 +25,7 @@ jobs:
       matrix:
         include:
           - {os: windows-latest, name: Windows}
-          - {os: macos-14, name: Mac-AppleSilicon}
+          - {os: macos-15, name: Mac-AppleSilicon}   # macos-14 is no longer offered by GitHub
           - {os: macos-15-intel, name: Mac-Intel}
           - {os: ubuntu-22.04, name: Linux}          # an older Ubuntu, so the app also runs on older Linux systems
     runs-on: ${{ matrix.os }}
