@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from dataclasses import dataclass, fields
 from functools import lru_cache
 
@@ -22,7 +23,7 @@ from . import separate as sep
 from .config import Params
 from .page import Job, PageOpts, Plate, fit_artwork
 from .preprocess import load_rgb
-from .trace import mask_to_path
+from .trace import mask_to_path, mask_to_polys, polygons_to_path, polys_to_rings, rings_to_mask
 
 MAX_INKS = 10
 MAX_DITHER_PX = 3_000_000       # dither pixels per plate
@@ -421,6 +422,24 @@ def _design_region(dark: np.ndarray, mm_px: float, outline_mm: float) -> np.ndar
     return filled
 
 
+def _disc(mm: float, mm_px: float) -> np.ndarray:
+    r = max(1, int(round(mm / mm_px)))
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+
+
+def _gaps_closed(m: np.ndarray, mm: float, mm_px: float) -> np.ndarray:
+    """The mask with gaps up to twice `mm` wide closed. The picture's edge is no part of the shape:
+    a gap between the shape and the edge stays open."""
+    disc = _disc(mm, mm_px)
+    r = disc.shape[0] // 2 + 1
+    return cv2.morphologyEx(np.pad(m, r), cv2.MORPH_CLOSE, disc)[r:-r, r:-r]
+
+
+def _pulled_in(m: np.ndarray, mm_px: float) -> np.ndarray:
+    """A quarter millimetre in from every edge of the shape, the picture's own edge included."""
+    return cv2.erode(m, _disc(0.25, mm_px), borderType=cv2.BORDER_CONSTANT, borderValue=0)
+
+
 def _underbase_mask(printed: np.ndarray, mm_px: float) -> np.ndarray:
     """Solid shape under everything that prints, pulled in a little so white never peeks out."""
     m = (printed > 0.03).astype(np.uint8)
@@ -428,6 +447,342 @@ def _underbase_mask(printed: np.ndarray, mm_px: float) -> np.ndarray:
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
     e = max(1, int(round(0.25 / mm_px)))
     return cv2.erode(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * e + 1, 2 * e + 1))).astype(np.float32)
+
+
+def _solid_core(ink: np.ndarray, grid_mm: float, lean: bool = False, grid_mm_y: float = 0.0) -> np.ndarray:
+    """One ink: where white may always go. `ink` is the ink plate as it goes out (its dithered pixels,
+    or what its traced outlines cover, on the plate's own pixels of `grid_mm`); this is that ink a
+    quarter millimetre in from its edges (at least one pixel), so there is ink over every bit of it
+    and around it.
+
+    The underbase mask above is pulled in on the picture's own pixels, at least one whole pixel. In a
+    picture with few pixels that is a millimetre or more, and a thin part is left with no white at
+    all although its ink is solid. This gives such parts their white, and is drawn in with the mask."""
+    # In whole pixels: rounded up, or (`lean`: the ink given is itself on the narrow side) to the nearest.
+    # (`grid_mm_y`: the pixels' height, if they are not square.)
+    rx, ry = (max(1, int(round(0.25 / g)) if lean else int(np.ceil(0.25 / g - 1e-6))) for g in (grid_mm, grid_mm_y or grid_mm))
+    return cv2.erode(_bytes(ink), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rx + 1, 2 * ry + 1)),
+                     borderType=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def _bytes(m: np.ndarray) -> np.ndarray:
+    """A mask as bytes of 0 and 1, without copying it if it need not be."""
+    return m.view(np.uint8) if m.dtype == bool else m.astype(np.uint8, copy=False)
+
+
+class _Rings:
+    """Outlines (from polys_to_rings) that are drawn a piece of the plate at a time.
+
+    A long outline is taken in runs of 128 points with a box round each. For one piece, a run that
+    lies altogether beyond one of the piece's sides is left out but for its first point: the straight
+    line that takes its place lies beyond that side too, so nothing changes within the piece. (Drawing
+    the whole of a long outline again for every piece it crosses took most of the time on a large
+    design: a stripe across a two-metre plate has a hundred thousand points.)"""
+    RUN = 128
+
+    def __init__(self, rings: list):
+        self.rings = rings
+        self.lo = np.array([r.min(axis=0) for r in rings]).reshape(-1, 2)
+        self.hi = np.array([r.max(axis=0) for r in rings]).reshape(-1, 2)
+        self.runs = {}
+        for k, r in enumerate(rings):
+            if len(r) > 4 * self.RUN:
+                at = np.arange(0, len(r), self.RUN)
+                nxt = r[np.append(at[1:], 0)]                               # (a run reaches to the first point of the next)
+                self.runs[k] = (np.minimum(np.minimum.reduceat(r, at, axis=0), nxt), np.maximum(np.maximum.reduceat(r, at, axis=0), nxt))
+
+    def near(self, xs: float, ys: float, xe: float, ye: float) -> list:
+        """The outlines that can matter within that box (in the outlines' own units), long ones
+        without their runs elsewhere."""
+        out = []
+        for k in np.flatnonzero((self.lo[:, 0] < xe) & (self.hi[:, 0] > xs) & (self.lo[:, 1] < ye) & (self.hi[:, 1] > ys)).tolist():
+            r = self.rings[k]
+            if k in self.runs:
+                lo, hi = self.runs[k]
+                far = (hi[:, 0] < xs - 1) | (lo[:, 0] > xe + 1) | (hi[:, 1] < ys - 1) | (lo[:, 1] > ye + 1)
+                if far.any():
+                    counts = np.where(far, 1, self.RUN)
+                    if not far[-1]:
+                        counts[-1] = len(r) - (len(far) - 1) * self.RUN     # (the last run is as long as it is)
+                    first = np.cumsum(counts) - counts
+                    r = r[np.repeat(np.arange(len(far)) * self.RUN - first, counts) + np.arange(int(counts.sum()))]
+            out.append(r)
+        return out
+
+
+def _straight_outlines(mask: np.ndarray, dx: int = 0, dy: int = 0, halves: bool = True) -> str:
+    """A mask as one path (fill-rule evenodd) of straight-sided outlines, in units of half a pixel
+    counted from the middle of the mask's first half pixel (plus `dx`, `dy`, for a piece of a larger
+    mask). Or with `halves` off, quicker and a little coarser: in whole pixels, counted from the
+    middle of the first.
+
+    For white that is worked out on fine pixels and lies under ink (under flat colours, and what is
+    added under one ink): its edge is never seen, so it needs no smoothing and no curves. Tracing it
+    as a plate is traced took most of the time on a large design, and drawing it pixel by pixel
+    (a rectangle for every row of a slanting edge) made plates of many megabytes.
+
+    Each outline runs through the middles of the mask's outermost half pixels (or pixels), so a
+    quarter of a pixel (or half of one) inside the mask's own edge, and is simplified by up to one
+    pixel: that much it takes to draw the pixel steps along a slanting edge as one line, whatever
+    the slant (anything less leaves a point at every step). So the outline can cut up to three
+    quarters (or half) of a pixel across a hollow in the mask's edge, a part one pixel thin (or two)
+    is left out, and no specks are removed or holes filled: the plates have had that done, and the
+    white follows them."""
+    m = _bytes(np.ascontiguousarray(mask))
+    if halves:
+        m = cv2.resize(m, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    for c in contours:
+        q = cv2.approxPolyDP(c, 2.0 if halves else 1.0, True).reshape(-1, 2) if len(c) >= 3 else ()
+        if len(q) >= 3:
+            out.append("M" + "L".join(f"{x + dx} {y + dy}" for x, y in q.tolist()) + "Z")
+    return "".join(out)
+
+
+_PIECE = 1024                                                              # fine pixels to a side of a piece of the flat underbase
+
+
+def _flat_underbase(outlines: list, meant: np.ndarray, tp: Params, art: tuple) -> str:
+    """Flat colours: the underbase as a plate body. It is what the colour plates draw, pulled in a
+    quarter millimetre, and nothing else: no white under what the separation took for paper, under
+    detail too fine for the plates, across a gap or in a cutout.
+
+    `outlines`: each plate's outlines; `meant`: the areas they were traced from (both in working
+    pixels). Where two colours touch, tracing leaves a hairline between their outlines. The white is
+    not pulled back from those (only they are bridged, and only where `meant` says there is ink).
+
+    It is worked out on pixels of an eighth of a millimetre or finer, so many to a working pixel that
+    a quarter millimetre is (within a hundredth) a whole number of them; and a piece of the plate at
+    a time, each with enough around it to get its edges right, so a design of any size gets the same.
+    Each piece is outlined on its own (see _straight_outlines), lapping a little over its neighbours
+    so nothing shows between. (A piece no outline comes near is all white or has none: those are not
+    worked out, and the white ones are drawn as plain rectangles.)"""
+    ox, oy, aw, ah = art
+    h, w = meant.shape
+    px = aw / w
+    f = int(np.ceil(px / 0.125 - 1e-6))                                      # fine pixels to a working one
+    f = next((k for k in range(f, f + 8) if abs(round(0.25 * k / px) * px / k - 0.25) <= 0.01), f)
+    W, H, mm_px = w * f, h * f, px / f
+    n, pad, lap = _PIECE, int(np.ceil(0.9 / mm_px)) + 4, 2                   # (0.9 mm: the seams' reach and the pull-in)
+    plates = []
+    for polys in outlines:
+        rings = polys_to_rings(polys, tp.corner_deg, tp.precision, 0.25 / f)   # (to a quarter of a fine pixel)
+        if rings:
+            plates.append(_Rings(rings))
+    # On the working pixels, roughly: the ones an outline passes through or beside, and what is filled.
+    lines, filled = np.zeros((h, w), np.uint8), np.zeros((h, w), np.uint8)
+    for plate in plates:
+        rough = [np.rint((r - 0.5) * 8).astype(np.int32) for r in plate.rings]
+        cv2.polylines(lines, rough, True, 1, lineType=cv2.LINE_8, shift=3)
+        one = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(one, rough, 1, lineType=cv2.LINE_8, shift=3)
+        filled |= one
+    lines = cv2.dilate(lines, np.ones((3, 3), np.uint8))
+    edge = max(1, int(round(0.25 / mm_px)))                                  # (what _pulled_in takes off at the picture's sides)
+    meant, parts, plain = meant.astype(np.uint8), [], []
+    for y0 in range(0, H, n):
+        for x0 in range(0, W, n):
+            ys, ye, xs, xe = max(0, y0 - pad), min(H, y0 + n + pad), max(0, x0 - pad), min(W, x0 + n + pad)
+            ty, by, lx, rx = max(ys, y0 - lap), min(ye, y0 + n + lap), max(xs, x0 - lap), min(xe, x0 + n + lap)
+            rows, cols = slice(max(0, ys // f - 1), (ye - 1) // f + 2), slice(max(0, xs // f - 1), (xe - 1) // f + 2)
+            if not lines[rows, cols].any():                                  # no outline near: all of it filled, or none
+                if filled[(ys + ye) // 2 // f, (xs + xe) // 2 // f]:
+                    plain.append((max(lx, edge), max(ty, edge), min(rx, W - edge), min(by, H - edge)))
+                continue
+            drawn = np.zeros((ye - ys, xe - xs), np.uint8)
+            for plate in plates:
+                near = plate.near(xs / f, ys / f, xe / f, ye / f)
+                if near:
+                    drawn |= rings_to_mask(near, drawn.shape, (f, f), (xs, ys)).astype(np.uint8)
+            if not drawn.any():
+                continue
+            seams = _gaps_closed(drawn, 0.3, mm_px) & ~drawn                # what closing the gaps adds:
+            if seams.any():                                                  # only where ink was meant
+                r0, c0 = ys // f, xs // f
+                want = np.repeat(np.repeat(meant[r0:(ye - 1) // f + 1, c0:(xe - 1) // f + 1], f, axis=0), f, axis=1)
+                seams &= want[ys - r0 * f:ye - r0 * f, xs - c0 * f:xe - c0 * f]
+            under = _pulled_in(drawn | seams, mm_px) & drawn
+            d = _straight_outlines(under[ty - ys:by - ys, lx - xs:rx - xs])
+            if d:                                                           # (in half fine pixels, from the middle of the first)
+                parts.append(f'<g transform="translate({ox + (lx + 0.25) * aw / W:.3f} {oy + (ty + 0.25) * ah / H:.3f}) '
+                             f'scale({aw / W / 2:.6f} {ah / H / 2:.6f})"><path fill-rule="evenodd" d="{d}"/></g>')
+    # The plain pieces: those side by side as one rectangle, and rows of them that match as one.
+    rects = []
+    for x1, y1, x2, y2 in plain:
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if rects and rects[-1][1] == y1 and rects[-1][3] == y2 and rects[-1][2] >= x1:
+            rects[-1][2] = x2
+        else:
+            rects.append([x1, y1, x2, y2])
+    tall = {}
+    for x1, y1, x2, y2 in rects:
+        above = tall.pop((x1, x2, y1), None) or tall.pop((x1, x2, y1 + 2 * lap), None)
+        tall[(x1, x2, y2)] = (above[0] if above else y1, y2)
+    if tall:
+        d = "".join(f"M{x1} {y1}h{x2 - x1}v{y2 - y1}h{x1 - x2}z" for (x1, x2, _), (y1, y2) in tall.items())
+        parts.append(f'<g transform="translate({ox:.3f} {oy:.3f}) scale({aw / W:.6f} {ah / H:.6f})"><path d="{d}"/></g>')
+    return "".join(parts)
+
+
+def _added_white(ink: np.ndarray, has: np.ndarray, where: np.ndarray, mm: float, lean: bool = False, mm_y: float = 0.0) -> np.ndarray:
+    """One ink: the white to add to an underbase. `ink` is the ink plate as it goes out, `has` the
+    white that is there, and `where` the shape the underbase is for (before its pull-in), all as
+    masks on the same pixels of `mm` millimetres (by `mm_y`, if not square). The answer is the solid
+    core of the ink (see _solid_core) within that shape, but only what that adds to the white that is
+    there, with a little overlap so that no hairline is left between the two. (Not the slivers one
+    pixel thin that the two leave along a shared edge; a thin part on its own is no sliver.)"""
+    # (All in bytes of 0 and 1, each step into the array of the one before: these are millions of pixels.)
+    more = _solid_core(ink, mm, lean, mm_y)
+    more &= _bytes(where)
+    has = _bytes(has)
+    added = np.bitwise_not(has)                                             # (of a 0 or 1 that is 255 or 254: its last bit is "not", and
+    added &= more                                                           # the "and" keeps only that) what the core adds to the white there
+    far = cv2.dilate(has, np.ones((5, 5), np.uint8))
+    np.bitwise_not(far, out=far)
+    far &= added                                                            # ...the part of that away from the white
+    two = np.ones((2, 2), np.uint8)                                         # (opened with the square put back where it was taken from:
+    gain = cv2.dilate(cv2.erode(added, two, anchor=(0, 0)), two, anchor=(1, 1))   # OpenCV's own opening shifts a 2 x 2 by a pixel)
+    gain |= far                                                             # worth adding: more than a sliver, or on its own
+    out = cv2.dilate(gain, np.ones((9, 9), np.uint8))
+    out &= more
+    inner = cv2.erode(has, np.ones((9, 9), np.uint8))
+    np.bitwise_not(inner, out=inner)
+    out &= inner                                                            # the core around that, lapping four pixels over the white
+    return out.view(bool)
+
+
+def _shape_at(shape: np.ndarray, x_mm: np.ndarray, y_mm: np.ndarray, aw: float, ah: float) -> np.ndarray:
+    """The underbase's shape (a mask over the artwork, aw x ah mm) at the points x_mm by y_mm, measured
+    from the artwork's corner (both going up): the pixel each point falls in, nothing rounded up,
+    nothing beyond it."""
+    sh, sw = shape.shape
+    xi, yi = np.floor(x_mm / aw * sw).astype(int), np.floor(y_mm / ah * sh).astype(int)
+    xc, yc = np.clip(xi, 0, sw - 1), np.clip(yi, 0, sh - 1)
+    if not len(xc) or not len(yc):
+        return np.zeros((len(yc), len(xc)), bool)
+    # (The points come in order, left to right and top to bottom: each pixel of the shape so many times over, in a block.)
+    part = _bytes(np.ascontiguousarray(shape[yc[0]:yc[-1] + 1, xc[0]:xc[-1] + 1]))
+    out = np.repeat(np.repeat(part, np.bincount(yc - yc[0]), axis=0), np.bincount(xc - xc[0]), axis=1)
+    out[(yi < 0) | (yi >= sh), :] = 0
+    out[:, (xi < 0) | (xi >= sw)] = 0
+    return out.view(bool)
+
+
+def _box_around(m: np.ndarray, pad: int) -> tuple | None:
+    """The rows and columns of a mask that have anything in them, with `pad` more on every side:
+    (first row, row after the last, first column, column after the last); None for an empty mask."""
+    rows, cols = np.flatnonzero(m.any(axis=1)), np.flatnonzero(m.any(axis=0))
+    if not len(rows):
+        return None
+    return int(rows[0]) - pad, int(rows[-1]) + 1 + pad, int(cols[0]) - pad, int(cols[-1]) + 1 + pad
+
+
+def _piece_outlined(more: np.ndarray, f: int, ys: int, xs: int, ty: int, by: int, lx: int, rx: int) -> str:
+    """One piece of added white as a path (see _straight_outlines; "" if there is none in it), in fine
+    pixels of the whole plate, counted from the middle of the first. `more` is the white on fine pixels, `f` of them to a plate pixel, starting at
+    the plate's pixel (ys, xs); the piece is its part for the plate's pixels [ty, by) x [lx, rx),
+    and two fine pixels more on every side, so that it laps over the pieces beside it (their
+    outlines run a little inside their masks, and a hairline would be left between them)."""
+    y0, x0 = max(0, (ty - ys) * f - 2), max(0, (lx - xs) * f - 2)
+    return _straight_outlines(more[y0:(by - ys) * f + 2, x0:(rx - xs) * f + 2], xs * f + x0, ys * f + y0, halves=False)
+
+
+def _added_dither_white(ink: np.ndarray, has: np.ndarray, shape: np.ndarray, aw: float, ah: float) -> tuple[list, int]:
+    """One ink, dithered: the white to add (see _added_white), as paths in units of 1/f of a dither
+    square, one for each piece that has any (see _piece_outlined); f is returned with them. `ink`
+    and `has` are the two plates' squares.
+
+    Worked out on pixels of a sixteenth of a millimetre or finer (a whole number of them to a
+    square), a piece of the plate at a time, so that a quarter millimetre is a quarter millimetre
+    however large the design is."""
+    H, W = ink.shape
+    grain = max(aw / W, ah / H)
+    f = max(1, int(np.ceil(grain / 0.0625 - 1e-6)))
+    # ...and of the next few, the number that puts a quarter millimetre nearest to a whole number of
+    # them from below (the pull-in is rounded up to whole pixels: 0.8 mm squares in 16 lose nothing).
+    f = min(range(f, f + 8), key=lambda k: (round(np.ceil(0.25 * k / grain - 1e-6) * grain / k, 6), k))
+    mx, my = aw / W / f, ah / H / f
+    n = max(16, 2048 // f)                                                  # squares to a piece (about 4 million fine pixels)
+    pad = int(np.ceil((0.25 / min(mx, my) + 9) / f)) + 1                    # squares around it that can still matter to it
+    ink, has, parts = ink.astype(np.uint8), has.astype(np.uint8), []
+    for y0 in range(0, H, n):
+        for x0 in range(0, W, n):
+            ys, ye, xs, xe = max(0, y0 - pad), min(H, y0 + n + pad), max(0, x0 - pad), min(W, x0 + n + pad)
+            box = _box_around(ink[ys:ye, xs:xe] & ~has[ys:ye, xs:xe], pad)   # ink there that hasn't its white
+            if box is None:                                                  # none: nothing to add
+                continue
+            # Only around those squares: what is added lies within a square of them.
+            ty, by, lx, rx = max(y0, ys + box[0]), min(y0 + n, H, ys + box[1]), max(x0, xs + box[2]), min(x0 + n, W, xs + box[3])
+            if ty >= by or lx >= rx:
+                continue
+            ys, ye, xs, xe = max(0, ty - pad), min(H, by + pad), max(0, lx - pad), min(W, rx + pad)
+
+            def fine(m):
+                return np.repeat(np.repeat(m[ys:ye, xs:xe], f, axis=0), f, axis=1)
+            where = _shape_at(shape, (np.arange(xs * f, xe * f) + 0.5) * mx, (np.arange(ys * f, ye * f) + 0.5) * my, aw, ah)
+            parts.append(_piece_outlined(_added_white(fine(ink), fine(has), where, mx, mm_y=my), f, ys, xs, ty, by, lx, rx))
+    return [d for d in parts if d], f
+
+
+def _added_screen_white(ink: list, has: list, tp: Params, shape: np.ndarray, size: tuple, px_mm: float,
+                        aw: float, ah: float) -> tuple[list, int]:
+    """One ink, screened: the white to add (see _added_white), as paths in units of 1/g of a plate
+    pixel, one for each piece that has any (see _piece_outlined); g is returned with them. `ink` and
+    `has` are the two plates' outlines as they go out (in plate pixels of `px_mm`, on a plate of
+    `size` = (W, H) pixels; `tp`: how they are drawn).
+
+    Worked out on pixels of a sixteenth of a millimetre or finer (a whole number of them to a plate
+    pixel), a piece of the plate at a time, so that a quarter millimetre is a quarter millimetre
+    however large the design is and however coarse the plate's own pixels are."""
+    W, H = size
+    g = max(1, int(np.ceil(px_mm / 0.0625 - 1e-6)))
+    fine = px_mm / g
+    n = max(16, 2048 // g)                                                  # plate pixels to a piece
+    pad = int(np.ceil((0.25 / fine + 9) / g)) + 1
+    # (The curves as they are written out, followed to a quarter of a fine pixel: a long curve drawn
+    # as a few straight lines would put the white beside the ink.)
+    ink, has = (polys_to_rings(q, tp.corner_deg, tp.precision, 0.25 / g) for q in (ink, has))
+    if not ink:
+        return [], g
+    # First on the plate's own pixels, roughly: where is there ink at all that hasn't white right
+    # under it? Only pieces with some of that are worked out finely.
+    # (Ink taken generously and pulled in by less than a quarter millimetre; white only where a pixel
+    # is all white and no edge of the white passes through it. So nothing that could get white is missed.)
+    touched, edges = np.zeros((H, W), np.uint8), np.zeros((H, W), np.uint8)
+    cv2.fillPoly(touched, [np.rint((r - 0.5) * 8).astype(np.int32) for r in ink], 1, lineType=cv2.LINE_8, shift=3)
+    cv2.polylines(edges, [np.rint((r - 0.5) * 8).astype(np.int32) for r in has], True, 1, lineType=cv2.LINE_8, shift=3)
+    k = int(0.25 / px_mm)
+    core = cv2.erode(touched, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)), borderType=cv2.BORDER_CONSTANT, borderValue=0) if k else touched
+    wanting = core.astype(bool) & ~(rings_to_mask(has, (H, W)) & ~edges.astype(bool))
+    parts, ink, has = [], _Rings(ink), _Rings(has)
+    for y0 in range(0, H, n):
+        for x0 in range(0, W, n):
+            ys, ye, xs, xe = max(0, y0 - pad), min(H, y0 + n + pad), max(0, x0 - pad), min(W, x0 + n + pad)
+            box = _box_around(wanting[ys:ye, xs:xe], pad)
+            if box is None:
+                continue
+            # Only around the pixels that want white: what is added lies within `pad` of them.
+            ty, by, lx, rx = max(y0, ys + box[0]), min(y0 + n, H, ys + box[1]), max(x0, xs + box[2]), min(x0 + n, W, xs + box[3])
+            if ty >= by or lx >= rx:
+                continue
+            ys, ye, xs, xe = max(0, ty - pad), min(H, by + pad), max(0, lx - pad), min(W, rx + pad)
+            near = [rings.near(xs, ys, xe, ye) for rings in (ink, has)]
+            there = ((ye - ys) * g, (xe - xs) * g)
+            where = _shape_at(shape, (np.arange(xs * g, xe * g) + 0.5) * fine, (np.arange(ys * g, ye * g) + 0.5) * fine, aw, ah)
+            more = _added_white(rings_to_mask(near[0], there, (g, g), (xs * g, ys * g)),
+                                rings_to_mask(near[1], there, (g, g), (xs * g, ys * g)), where, fine, lean=True)
+            parts.append(_piece_outlined(more, g, ys, xs, ty, by, lx, rx))
+    return [d for d in parts if d], g
+
+
+def _added_groups(paths: list, ax: float, ay: float, ux: float, uy: float) -> str:
+    """The added white's paths (see _piece_outlined) on the plate, each a group of its own (they lap
+    over each other, and each is filled by itself): the artwork's corner is at (ax, ay) mm and a
+    fine pixel is ux by uy mm. (Their units are fine pixels, counted from the middle of the first.)"""
+    place = f'<g transform="translate({ax + ux / 2:.4f} {ay + uy / 2:.4f}) scale({ux:.8f} {uy:.8f})">'
+    return "".join(f'{place}<path fill-rule="evenodd" d="{d}"/></g>' for d in paths)
 
 
 def _is_white(h: str) -> bool:
@@ -454,9 +809,16 @@ def _plate_specs(rgb: np.ndarray, p: PrintParams, W: int, H: int, aw: float = 0.
                 # which the ink plate is made from too (after smoothing it, if that is set). Taken from
                 # the picture before Tone, the white lay under the wrong half of an inverted picture, and
                 # under greys that Tone had turned to no ink.
-                ub = _underbase_mask(ht._tone(np.clip(plane, 0, 1), p), mm_px)
-                return ([("White underbase", "#ffffff", 0.0), ("Ink", p.ink, p.angle)],
-                        (lambda i: ub if i == 0 else plane), {"garment": p.dark_bg})
+                inked = ht._tone(np.clip(plane, 0, 1), p)
+                ub = _underbase_mask(inked, mm_px)
+
+                def planes(i):
+                    return ub if i == 0 else plane
+                planes.underbase = 0                                # plate 0 is the underbase made here, plate 1 its ink
+                k = max(1, int(round(0.8 / mm_px)))                 # and the shape it is for, before the pull-in (as in _underbase_mask)
+                planes.underbase_for = cv2.morphologyEx((inked > 0.03).astype(np.uint8), cv2.MORPH_CLOSE,
+                                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
+                return [("White underbase", "#ffffff", 0.0), ("Ink", p.ink, p.angle)], planes, {"garment": p.dark_bg}
             return [("Ink", p.ink, p.angle)], (lambda i: plane), {"garment": p.dark_bg}
         return [("Ink", p.ink, p.angle)], (lambda i: plane), {}
     if p.method == "cmyk":
@@ -522,19 +884,12 @@ def _flat(rgb: np.ndarray, p: PrintParams, page: PageOpts) -> Job:
         picked = [c for c in p.colors if c] if p.picked else []
         sp = sep.SepParams(inks=len(picked) or p.inks, paper=p.paper, trap=p.trap, speckle=p.speckle,
                            smooth=p.smooth, colors=tuple(picked) if picked else p.colors, names=p.names, fixed=bool(picked))
-        job = sep.build(f, sp, page)
-        if p.dark and p.underbase:
-            border = np.concatenate([rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]])
-            gar = np.median(border, axis=0).astype(np.uint8)                       # the design's own paper
-            printed = (np.abs(rgb.astype(np.int16) - gar.astype(np.int16)).sum(2) > 24).astype(np.float32)
-            ub = _underbase_mask(printed, mm_px)
-            two = np.empty_like(rgb); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)
-            f2 = os.path.join(td, "under.png")
-            Image.fromarray(two).save(f2)
-            ju = sep.build(f2, sep.SepParams(inks=1, paper=True, trap=0.0, speckle=p.speckle, smooth=p.smooth), page)
-            if ju.plates:
-                u = ju.plates[0]
-                job.plates.insert(0, Plate("White underbase", "#ffffff", u.body))
+        keep = {} if p.dark and p.underbase else None
+        job = sep.build(f, sp, page, keep)
+    if keep is not None:
+        body = _flat_underbase(keep["outlines"], keep["meant"], keep["trace"], job.art)
+        if body:
+            job.plates.insert(0, Plate("White underbase", "#ffffff", body))
     job.info["kind"] = "flat"
     if p.dark:
         job.info["garment"] = p.dark_bg
@@ -596,6 +951,28 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
     total = 0
 
     solid = getattr(plane, "solid", None)
+    under = getattr(plane, "underbase", None)
+    kept, keeping = {}, threading.Lock()
+
+    def laid(i, t):
+        """Tone t (0..1) as plate i's ink on the plate's own pixels: screened or dithered."""
+        if p.render == "screen":
+            return ht._screen(t, cell_px, specs[i][2], table, p.shape, stamp)
+        return dither_mask(t, p.dither, i, serp)
+
+    def finished(i):
+        """Plate i as it goes out: its dithered pixels, or (a screen) the outlines traced from it.
+        (The ink over an underbase is wanted twice, for its own plate and for the underbase, and is
+        worked out once.)"""
+        def make():
+            mask = laid(i, ht._tone(np.clip(_to_grid(plane(i), W, H, p.smoothing), 0, 1), p))
+            return mask_to_polys(mask, tp, fast=p.draft, edge=True) if p.render == "screen" else mask   # (ink at the picture's edge is outlined along it)
+        if under is None or i != under + 1:
+            return make()
+        with keeping:
+            if i not in kept:
+                kept[i] = make()
+            return kept[i]
 
     def solid_body(i):
         """Flat areas of ink i as clean vector shapes, in page millimetres."""
@@ -610,18 +987,31 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
 
     def one(i):
         name, ink, ang = specs[i]
-        t = ht._tone(np.clip(_to_grid(plane(i), W, H, p.smoothing), 0, 1), p)
-        if specs[i][0] == "White underbase":                       # a solid, never screened
-            t = np.where(_to_grid(plane(i), W, H, 0) > 0.5, 1.0, 0.0).astype(np.float32)
+        solid_white = name == "White underbase"                    # a solid, never screened
+        t = np.where(_to_grid(plane(i), W, H, 0) > 0.5, 1.0, 0.0).astype(np.float32) if solid_white else None
         if p.render == "screen":
-            d = mask_to_path(ht._screen(t, cell_px, ang, table, p.shape, stamp), tp, fast=p.draft, edge=True)   # (ink at the picture's edge is outlined along it)
+            # (Ink at the picture's edge is outlined along it: see mask_to_polys.)
+            polys = mask_to_polys(laid(i, t), tp, fast=p.draft, edge=True) if solid_white else finished(i)
+            d = polygons_to_path(polys, tp.corner_deg, tp.precision)
             body = (f'<g transform="translate({ax:.3f} {ay:.3f}) scale({px_mm:.6f})">'
                     f'<path fill-rule="evenodd" d="{d}"/></g>') if d else ""
+            n = d.count("M")
+            if i == under:                                          # the underbase made here (not a plate that is only named so)
+                # ...also goes well inside its ink, wherever that is: inside the ink's outlines as they
+                # go out, worked out on fine pixels and outlined along those pixels with straight lines
+                # (it lies under ink, so its edge is never seen and needs no smoothing).
+                md, g = _added_screen_white(finished(i + 1), polys, tp, plane.underbase_for, (W, H), px_mm, aw, ah)
+                body += _added_groups(md, ax, ay, float(f"{px_mm:.6f}") / g, float(f"{px_mm:.6f}") / g)   # (on the ink plate's own scale, as written; not counted as dots)
             sb, sn = solid_body(i)
-            return body + sb, d.count("M") + sn
-        d, n = runs_path(dither_mask(t, p.dither, i, serp))
+            return body + sb, n + sn
+        mask = laid(i, t) if solid_white else finished(i)
+        d, n = runs_path(mask)
         body = (f'<g transform="translate({ax:.3f} {ay:.3f}) scale({aw / W:.6f} {ah / H:.6f})">'
                 f'<path d="{d}"/></g>') if d else ""
+        if i == under:
+            # Likewise for a dither: well inside the ink's own squares.
+            md, f = _added_dither_white(finished(i + 1), mask, plane.underbase_for, aw, ah)
+            body += _added_groups(md, ax, ay, float(f"{aw / W:.6f}") / f, float(f"{ah / H:.6f}") / f)   # (on the ink plate's own scale, as written)
         sb, sn = solid_body(i)
         return body + sb, n + sn
 

@@ -351,6 +351,44 @@ def mask_to_path(mask: np.ndarray, p: Params, fast: bool = False, edge: bool = F
     return polygons_to_path(mask_to_polys(mask, p, fast, edge), p.corner_deg, p.precision)
 
 
+def polys_to_rings(polys: list, corner_deg: float, prec: int | None = None, tol: float = 0.02) -> list:
+    """The curves polygons_to_path draws for these outlines, each as a ring of points so close together
+    that the straight lines between them are nowhere further than `tol` from the curve (a long curve
+    gets many points, a short one few). `prec`: the curves as they are written out with that many
+    decimals, not as they were worked out."""
+    if not polys:
+        return []
+    pts, c1, c2, p3, straight, starts, ends = _curves(polys, corner_deg)
+    if prec is not None:
+        k = 10.0 ** prec
+        pts, c1, c2, p3 = (np.rint(a * k) / k for a in (pts, c1, c2, p3))
+    # A cubic in n equal steps is within 3/4 * bend / n^2 of its chords (bend: its largest second difference).
+    bend = np.maximum(np.linalg.norm(pts - 2 * c1 + c2, axis=1), np.linalg.norm(c1 - 2 * c2 + p3, axis=1))
+    steps = np.clip(np.ceil(np.sqrt(0.75 * bend / tol)), 1, 4096).astype(np.int64)
+    steps[straight] = 1
+    first = np.cumsum(steps) - steps
+    seg = np.repeat(np.arange(len(pts)), steps)
+    t = ((np.arange(len(seg)) - first[seg] + 1) / steps[seg])[:, None]      # each point ends a step: t in (0, 1]
+    along = (1 - t) ** 3 * pts[seg] + 3 * (1 - t) ** 2 * t * c1[seg] + 3 * (1 - t) * t ** 2 * c2[seg] + t ** 3 * p3[seg]
+    last = first + steps
+    return [along[first[s0]:last[e0 - 1]] for s0, e0 in zip(starts.tolist(), ends.tolist())]
+
+
+def rings_to_mask(rings: list, shape: tuple, scale: tuple = (1.0, 1.0), origin: tuple = (0, 0)) -> np.ndarray:
+    """Rings from polys_to_rings filled evenodd, as a mask of that shape. `scale`: (x, y) pixels of
+    the mask to one unit of the rings, to draw them finer than they were traced. `origin`: the mask's
+    corner in those pixels, for a piece of a larger drawing.
+
+    A pixel counts only if all of it is inside (it is drawn at twice the size and each pixel's four
+    quarters must all be filled), so the mask never reaches past the outlines or across a gap."""
+    h, w = shape
+    big = np.zeros((2 * h, 2 * w), np.uint8)
+    if rings:
+        grow, shift = (2.0 * scale[0], 2.0 * scale[1]), (2.0 * origin[0], 2.0 * origin[1])
+        cv2.fillPoly(big, [np.rint((r * grow - shift - 0.5) * 8).astype(np.int32) for r in rings], 1, lineType=cv2.LINE_8, shift=3)
+    return (big[0::2, 0::2] & big[1::2, 0::2] & big[0::2, 1::2] & big[1::2, 1::2]).astype(bool)
+
+
 def _svg(w: int, h: int, body: list[str]) -> str:
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '

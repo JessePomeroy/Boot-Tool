@@ -110,7 +110,10 @@ def _fixed_labels(path, colors, want_paper: bool, p: Params):
     return labels, np.array(pal, np.uint8), paper
 
 
-def build(path, p: SepParams, page: PageOpts) -> Job:
+def build(path, p: SepParams, page: PageOpts, keep: dict | None = None) -> Job:
+    """`keep`: a dict for a caller that goes on from the plates (an underbase). It is given "outlines"
+    (each plate's outlines, as traced, in working pixels), "meant" (the areas they were traced from,
+    as one mask in working pixels) and "trace" (how they were traced)."""
     k = p.inks + (1 if p.paper else 0)
     tp = Params(mode="color", colors=k, min_side=1500, max_side=3000, speckle=p.speckle,
                 smooth_sigma=max(p.smooth, 2.2), epsilon=0.7)
@@ -139,6 +142,7 @@ def build(path, p: SepParams, page: PageOpts) -> Job:
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * trap_px + 1, 2 * trap_px + 1)) if trap_px else None
 
     job = Job(opts=page, art=art)
+    outlines, meant = [], np.zeros((h, w), bool)
     seen: dict[str, int] = {}
     palette_info = []
     for idx, lbl in enumerate(order):
@@ -155,9 +159,12 @@ def build(path, p: SepParams, page: PageOpts) -> Job:
         name = p.names[idx] if idx < len(p.names) and p.names[idx] else auto_name
         palette_info.append({"hex": hex_, "auto_hex": auto_hex, "name": name, "auto_name": auto_name})
         # (A colour that reaches the picture's edge is outlined along it: see mask_to_polys.)
-        d = polygons_to_path(mask_to_polys(mask, tp, edge=True), tp.corner_deg, tp.precision)
+        polys = mask_to_polys(mask, tp, edge=True)
+        d = polygons_to_path(polys, tp.corner_deg, tp.precision)
         if not d:
             continue
+        outlines.append(polys)
+        meant |= mask
         body = (f'<g transform="translate({ox:.3f} {oy:.3f}) scale({sc:.6f})">'
                 f'<path fill-rule="evenodd" d="{d}"/></g>')
         job.plates.append(Plate(name, hex_, body))
@@ -166,4 +173,6 @@ def build(path, p: SepParams, page: PageOpts) -> Job:
         "paper": ("#%02x%02x%02x" % tuple(int(c) for c in pal[paper])) if paper is not None else None,
         "trap_px": trap_px,
     }
+    if keep is not None:
+        keep.update(outlines=outlines, meant=meant, trace=tp)
     return job

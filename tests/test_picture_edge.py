@@ -389,9 +389,10 @@ def test_screens_away_from_the_edge_are_not_touched(tmp_path, monkeypatch):
               "cmyk": lambda src: pr.build(src, pr.PrintParams(method="cmyk", render="screen"), small),
               "halftone": lambda src: ht.build(src, ht.HalftoneParams(), small)}
     now = {k: (b(f), b(g)) for k, b in builds.items()}
-    real = tr.mask_to_path
-    for module in (pr, ht):
+    real, real_polys = tr.mask_to_path, tr.mask_to_polys
+    for module in (pr, ht):                                                 # (whichever of the two a module traces with)
         monkeypatch.setattr(module, "mask_to_path", lambda mask, p, fast=False, edge=False: real(mask, p, fast))
+        monkeypatch.setattr(module, "mask_to_polys", lambda mask, p, fast=False, edge=False: real_polys(mask, p, fast), raising=False)
     before = {k: (b(f), b(g)) for k, b in builds.items()}
     for k in builds:
         assert [p.body for p in now[k][0].plates] == [p.body for p in before[k][0].plates], k
