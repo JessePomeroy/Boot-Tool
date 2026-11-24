@@ -603,7 +603,9 @@ async function addFiles(files) {
 }
 function viewItem(i) {
   const it = BATCH.items[i]; if (!it) return;
-  BATCH.sel = i; bindConvert(); imageId = it.id; natW = it.w; natH = it.h; fileName = it.name.replace(/\.[^.]+$/, ""); lastRes = null; stageKey = "";
+  BATCH.sel = i; bindConvert(); imageId = it.id; natW = it.w; natH = it.h; fileName = LIB.names[it.id] || it.name.replace(/\.[^.]+$/, ""); lastRes = null; stageKey = "";
+  LIB.names[it.id] = fileName; libName = LIB.files[it.id] || "";       // each picture has its own library item
+  forgetResult(); libPrune();
   ownUrl = false; origURL = it.url; $("#orig").src = it.url;
   setName(fileName, `· ${it.w}×${it.h}`); $("#empty").style.display = "none"; $("#stage").style.display = "block";
   setMode("svg"); renderSide(); run();
@@ -620,7 +622,7 @@ function renderBatch() {
       const s = st && st.items[i] && st.items.length === its.length ? st.items[i] : null, state = s ? s.state : "ready";
       const svg = state === "done" ? `<img src="/api/batch/svg?job=${BATCH.job}&i=${i}&t=${s.bytes}">` : `<div style="color:var(--mute);font-size:12px;text-align:center;padding-top:30px">—</div>`;
       const chip = {ready: ["READY", "var(--btn)", "#000"], queued: ["QUEUED", "var(--btn)", "#000"], working: ["CONVERTING…", "#fff", "#000"], done: [s && s.saved_as ? "SAVED" : "DONE", "var(--acc)", "#fff"], error: ["FAILED", "#fff", "#a00"], stopped: ["STOPPED", "var(--btn)", "#000"]}[state];
-      const info = state === "done" ? `${s.path_count.toLocaleString()} paths · ${s.node_count.toLocaleString()} nodes · ${kb(s.bytes)}${s.saved_as && s.saved_as !== s.fname ? ` · saved as ${esc(s.saved_as)}` : ""}` : state === "error" ? `<span style="color:#a00">${esc(s.error || "failed")}</span>` : state === "working" ? "working on it…" : "";
+      const info = state === "done" ? `${s.path_count.toLocaleString()} paths · ${s.node_count.toLocaleString()} nodes · ${kb(s.bytes)}${s.library_error ? ` · not added to the library: ${esc(s.library_error)}` : ""}${s.saved_as && s.saved_as !== s.fname ? ` · saved as ${esc(s.saved_as)}` : ""}` : state === "error" ? `<span style="color:#a00">${esc(s.error || "failed")}</span>` : state === "working" ? "working on it…" : "";
       const custom = BATCH.per && it.own;
       return `<div class="brow${BATCH.per && BATCH.sel === i ? " sel" : ""}" data-i="${i}"><div class="bth"><img src="${it.url}"></div><div style="color:var(--mute)">→</div><div class="bth">${svg}</div><div style="flex:1;min-width:0"><div style="font-size:16px;overflow:hidden;text-overflow:ellipsis">${esc(it.name)}</div><div class="hint" style="margin:0">${it.w}×${it.h}${info ? " · " + info : ""}</div></div>${custom ? `<div class="bchip" style="background:var(--acc);color:#fff">✎ own settings</div>` : ""}<div class="bchip" style="background:${chip[1]};color:${chip[2]}">${chip[0]}</div><span class="bsm" data-open="${i}">Open</span>${batchRunning() ? "" : `<span class="bsm" data-rm="${i}">✕</span>`}</div>`;
     }).join("") + `<div class="hint" style="padding:10px 14px">${BATCH.per ? "Click an image to see it and edit its own settings. Images without ✎ follow the shared settings." : "Every image uses the Convert settings on the left."}</div>`;
@@ -638,7 +640,7 @@ function removeItem(i) {
   const it = BATCH.items[i]; if (it && it.url !== origURL) URL.revokeObjectURL(it.url);
   BATCH.items.splice(i, 1); BATCH.status = null; BATCH.job = null;
   if (BATCH.sel === i) BATCH.sel = -1; else if (BATCH.sel > i) BATCH.sel--;
-  bindConvert(); renderBatch(); if (BATCH.per) renderSide();
+  bindConvert(); renderBatch(); if (BATCH.per) renderSide(); libPrune();
 }
 let batchBtns = {};
 function syncBatchButtons() {
@@ -681,7 +683,7 @@ function batchSaveBox() {
     const k = el("div", "cell", `<label class="chk"><input type="checkbox"><span>Keep going if one image fails</span></label>`), ki = k.querySelector("input"); ki.checked = BATCH.keepGoing; ki.onchange = () => BATCH.keepGoing = ki.checked; b.append(k);
     const go = el("button", "btn go", "Convert"), zip = el("button", "btn", "Download .zip of the SVGs"), stop = el("button", "btn", "Stop"), clear = el("button", "btn", "Clear list");
     go.onclick = startBatch; stop.onclick = stopBatch; zip.onclick = () => { const a = document.createElement("a"); a.href = `/api/batch/zip?job=${BATCH.job}`; a.download = "boottool-svgs.zip"; a.click(); };
-    clear.onclick = () => { BATCH.items.forEach(it => { if (it.url !== origURL) URL.revokeObjectURL(it.url); }); BATCH.items = []; BATCH.status = null; BATCH.job = null; BATCH.sel = -1; bindConvert(); renderSide(); renderBatch(); };
+    clear.onclick = () => { BATCH.items.forEach(it => { if (it.url !== origURL) URL.revokeObjectURL(it.url); }); BATCH.items = []; libPrune(); BATCH.status = null; BATCH.job = null; BATCH.sel = -1; bindConvert(); renderSide(); renderBatch(); };
     batchBtns = {go, zip, stop, clear}; b.append(go, zip, stop, clear); setTimeout(syncBatchButtons); return b;
   }};
 }
@@ -892,7 +894,7 @@ function setTool(t) {
   if (was === "compose" && !isComp) Compose.leave();
   if (was === "simulate" && !isSim) Simulate.leave();
   $("#bt").style.display = t === "convert" ? "" : "none"; if (t !== "convert" && mode === "batch") setMode("svg");
-  $("#bgs").style.display = t === "convert" ? "contents" : "none"; $("#dl").style.display = t === "convert" ? "" : "none";
+  $("#bgs").style.display = t === "convert" ? "contents" : "none"; $("#dl").style.display = t === "convert" ? "" : "none"; $("#dl").disabled = !lastShown;   // Download needs this picture's own Convert result
   plateView = "all"; stageKey = ""; lastRes = null; lastPalette = [];
   if (isComp) { Compose.enter(renderSide); renderSide(); $("#draftbar").style.display = "none"; $("#busy").style.display = "none"; return; }
   if (isSim) { Simulate.enter(renderSide); renderSide(); $("#draftbar").style.display = "none"; $("#busy").style.display = "none"; return; }
@@ -920,6 +922,7 @@ async function load(file, to) {
     const lv = IMG.tonal ? IMG.auto : [0, 1, 255]; [P.print.lv_black, P.print.lv_gamma, P.print.lv_white] = lv; P.print.colors = []; P.print.names = []; P.print.angles_s = [];
     BATCH.sel = -1; bindConvert();
     libName = ""; imageId = j.id; natW = j.width; natH = j.height; fileName = file.name.replace(/\.[^.]+$/, ""); lastRes = null; lastPalette = []; plateView = "all"; stageKey = "";
+    LIB.names[j.id] = fileName; forgetResult(); libPrune();
     if (origURL && ownUrl) URL.revokeObjectURL(origURL); origURL = URL.createObjectURL(file); ownUrl = true; $("#orig").src = origURL;
     setName(fileName, `.${(file.name.match(/\.([^.]+)$/) || [0, "png"])[1]} · ${natW}×${natH}`); $("#empty").style.display = "none"; $("#stage").style.display = "block";
     if (to) setTool(to); else if (tool === "help" || tool === "compose") setTool("convert"); else { if (mode === "batch") setMode("svg"); if (tool === "print") renderSide(); renderTabs(); run(); }
@@ -930,7 +933,7 @@ function setName(n, dim) { $("#nmEdit").textContent = n; if (dim !== undefined) 
   const e = $("#nmEdit"); e.onclick = () => { if (!imageId) return; e.contentEditable = "plaintext-only"; e.focus(); const r = document.createRange(); r.selectNodeContents(e); const g = getSelection(); g.removeAllRanges(); g.addRange(r); };
   const done = ok => {
     e.contentEditable = "false"; const v = e.textContent.replace(/[\\/:*?"<>|\n]/g, "").trim().slice(0, 80);
-    if (ok && v && v !== fileName) { fileName = v; if (libName) renameInLibrary(v); } e.textContent = fileName;
+    if (ok && v && v !== fileName) { fileName = v; LIB.names[imageId] = v; LIB.renamed[imageId] = true; renameInLibrary(imageId); } e.textContent = fileName;
   };
   e.onblur = () => done(true); e.onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); e.blur(); } else if (ev.key === "Escape") { e.textContent = fileName; e.blur(); } ev.stopPropagation(); };
 })();
@@ -964,33 +967,80 @@ function layoutOrig() {
 }
 const cell = (l, v) => `<div><div class="lab">${l}</div><div class="val">${v}</div></div>`;
 const kb = b => b > 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.round(b / 1e3) + " KB";
-function renderStatsBack() { if (lastShown) show(lastShown); }
+function renderStatsBack() { if (lastShown) show(lastShown, true); }   // shown again, not a new result: nothing to save
+function forgetResult() {                            // the picture changed: the last picture's result must not be shown, saved or downloaded as this one's
+  lastShown = null; svgText = ""; if (svgURL) { URL.revokeObjectURL(svgURL); svgURL = null; }
+  $("#svgimg").removeAttribute("src"); $("#stats").innerHTML = ""; $("#dl").disabled = true;
+}
 let lastShown = null;
-let libTimer = null, libName = "";
-async function renameInLibrary(to) {                 // the library item takes the new name; its graphic is left as it is
-  try {
-    const r = await fetch("/api/library/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: libName, to})});
-    const j = await r.json(); if (!r.ok) throw new Error(j.error); libName = j.name;
-    const c = $("#libcell"); if (c) { c.textContent = "Saved as " + j.name; c.title = j.name; }
-  } catch (e) { libName = ""; }                       // removed from the library meanwhile: the next result is saved under the new name
+// The library item of each picture opened in this session, by picture id (a single shared name let a
+// rename made on one picture land on another's file). The server knows which file is a picture's own
+// (by its save key); here we keep the name the picture should have, the file name for display, and a
+// save or rename on its way.
+let libName = "";                                    // the current picture's library file ("" until saved)
+const LIB = {files: {}, names: {}, renamed: {}, status: {}, failed: {}, timers: {}, busy: {}};   // failed: why the latest result isn't saved
+function libPrune() {                                // forget pictures that are gone (not on screen, not in Batch, nothing pending)
+  for (const id of Object.keys(LIB.names)) {
+    if (id === imageId || LIB.timers[id] || LIB.busy[id] || BATCH.items.some(it => it.id === id)) continue;
+    delete LIB.names[id]; delete LIB.files[id]; delete LIB.renamed[id]; delete LIB.status[id]; delete LIB.failed[id];
+  }
 }
-function saveToLibrary() {
-  clearTimeout(libTimer); const id = imageId, name = fileName, svg = svgText;
-  libTimer = setTimeout(async () => {
+function libShow(id, text, title) {                  // remembered per picture; the Library cell shows the one on screen
+  LIB.status[id] = [text, title || ""];
+  if (id !== imageId) return;
+  const c = $("#libcell"); if (c) { c.textContent = text; c.title = title || ""; }
+}
+function libDo(id, job) {                            // one save or rename at a time per picture, in order
+  const next = (LIB.busy[id] || Promise.resolve()).then(job, job);
+  LIB.busy[id] = next; next.then(() => { if (LIB.busy[id] === next) { delete LIB.busy[id]; libPrune(); } });
+  return next;
+}
+function libSet(id, name) { LIB.files[id] = name; if (id === imageId) libName = name; }
+function renameInLibrary(id) {                       // the picture's library item takes its name; the graphic is left as it is
+  return libDo(id, async () => {
+    if (!LIB.renamed[id] || !LIB.files[id]) return;  // nothing asked for, or not saved yet (its save carries the name)
+    const to = LIB.names[id];
     try {
-      const r = await fetch("/api/library/save", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, svg, key: session + ":" + id})});
-      const j = await r.json(); if (!r.ok) throw new Error(j.error); libName = j.name;
-      const c = $("#libcell"); if (c) { c.textContent = "Saved as " + j.name; c.title = j.name; }
-    } catch (e) { const c = $("#libcell"); if (c) c.textContent = "Not saved: " + e.message; }
-  }, 1500);
+      const r = await fetch("/api/library/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({key: session + ":" + id, to})});
+      const j = await r.json(); if (!r.ok) throw Object.assign(new Error(j.error), {gone: r.status === 400});
+      if (LIB.names[id] === to) LIB.renamed[id] = false;
+      libSet(id, j.name);                            // renamed; if the latest result couldn't be saved, keep saying so
+      libShow(id, LIB.failed[id] ? `Not saved: ${LIB.failed[id]} (${j.name} holds the result before)` : "Saved as " + j.name, j.name);
+    } catch (e) {
+      if (e.gone) { libSet(id, ""); libShow(id, "Not in the library; the next result is saved as " + to); }   // nothing to rename
+      else {                                         // e.g. the folder can't be written: the item is still there; the next save tries again
+        libShow(id, "Not renamed: " + e.message, LIB.files[id]);
+        if (id === imageId && tool !== "convert") toast("Not renamed in the library: " + e.message);   // the Library cell is only on Convert
+      }
+    }
+  });
 }
-function show(j) {
+function saveToLibrary(res) {                        // res: the Convert result to keep (its rev says when it was made)
+  const id = imageId;
+  libShow(id, LIB.failed[id] ? "Not saved: " + LIB.failed[id] : LIB.files[id] ? "Saved as " + LIB.files[id] : "Saving…", LIB.files[id]);   // (a failed save stays on show until one succeeds)
+  clearTimeout(LIB.timers[id]);                      // only this picture's own pending save is replaced
+  LIB.timers[id] = setTimeout(() => { delete LIB.timers[id]; libDo(id, async () => {
+    try {
+      const sent = LIB.names[id] || "graphic";
+      const r = await fetch("/api/library/save", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name: sent, svg: res.svg, key: session + ":" + id, rev: res.rev, rename: !!LIB.renamed[id]})});
+      const j = await r.json(); if (!r.ok) throw new Error(j.error);
+      if (LIB.names[id] === sent && j.renamed !== false) LIB.renamed[id] = false;   // the save carried the name (if not, the rename below asks again and says why)
+      delete LIB.failed[id]; libSet(id, j.name); libShow(id, "Saved as " + j.name, j.name);
+      return true;
+    } catch (e) {                                    // its item, if it has one, is still there under its name, unless the library says it was deleted
+      if (/deleted from the library/.test(e.message)) libSet(id, "");
+      LIB.failed[id] = e.message; libShow(id, "Not saved: " + e.message);
+    }
+  }).then(saved => { if (saved) renameInLibrary(id); }); }, 1500);   // renamed while it was being saved: follow the name (not if the save failed)
+}
+function show(j, again) {
   lastShown = tool === "convert" ? j : null;
   svgText = j.svg; if (svgURL) URL.revokeObjectURL(svgURL);
   svgURL = URL.createObjectURL(new Blob([svgText], {type: "image/svg+xml"})); $("#svgimg").src = svgURL;
   if (tool === "convert") {
-    $("#dl").disabled = false; setStage(natW, natH, "convert"); layoutOrig(); lastRes = null; saveToLibrary();
-    $("#stats").innerHTML = cell("Library", `<span id="libcell">${libName ? "Saved as " + esc(libName) : "Saving…"}</span>`) + cell("Size", j.size.join("×")) + cell("Paths", j.stats.path_count.toLocaleString()) + cell("Nodes", j.stats.node_count.toLocaleString()) + cell("File", kb(j.stats.bytes)) + cell("Match", (j.scores.ssim_target == null ? "n/a" : j.scores.ssim_target.toFixed(3))) + cell("Mode", (j.mode === "lineart" ? "Line art" : "Colour") + " · " + j.ms + " ms");
+    $("#dl").disabled = false; setStage(natW, natH, "convert"); layoutOrig(); lastRes = null; if (!again) saveToLibrary(j);
+    $("#stats").innerHTML = cell("Library", `<span id="libcell" title="${esc((LIB.status[imageId] || ["", ""])[1])}">${esc((LIB.status[imageId] || ["Saving…"])[0])}</span>`) + cell("Size", j.size.join("×")) + cell("Paths", j.stats.path_count.toLocaleString()) + cell("Nodes", j.stats.node_count.toLocaleString()) + cell("File", kb(j.stats.bytes)) + cell("Match", (j.scores.ssim_target == null ? "n/a" : j.scores.ssim_target.toFixed(3))) + cell("Mode", (j.mode === "lineart" ? "Line art" : "Colour") + " · " + j.ms + " ms");
     return;
   }
   const first = !lastRes || lastRes.plates.map(x => x.name).join("|") !== j.plates.map(x => x.name).join("|"); lastRes = j; plateView = j.view;
@@ -1005,6 +1055,7 @@ function show(j) {
 }
 async function saveToPrintLibrary() {
   if (!imageId || !lastRes) return;
+  const name = fileName || "print";                  // named now: another picture may be open by the time it is saved
   try {
     toast("Saving to the Print library…");
     const r = await fetch("/api/design", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload(0))}), j = await r.json();
@@ -1014,20 +1065,25 @@ async function saveToPrintLibrary() {
     const u = URL.createObjectURL(new Blob([svg], {type: "image/svg+xml"})), im = new Image(); im.src = u; await im.decode();
     const c = document.createElement("canvas"); c.width = pw; c.height = ph; c.getContext("2d").drawImage(im, 0, 0, pw, ph); URL.revokeObjectURL(u);
     const png = c.toDataURL("image/png");
-    const r2 = await fetch("/api/prints/save", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: fileName || "print", png, width_mm: j.width_mm, height_mm: j.height_mm, garment: j.garment || ""})}), k = await r2.json();
+    const r2 = await fetch("/api/prints/save", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, png, width_mm: j.width_mm, height_mm: j.height_mm, garment: j.garment || ""})}), k = await r2.json();
     if (!r2.ok) throw new Error(k.error);
     toast(`Saved as ${k.name}. Find it in Simulate › Libraries › Print.`);
   } catch (e) { toast("Not saved: " + e.message); }
 }
 async function dl(kind) {
   if (!imageId) return;
+  const name = `${fileName}-${tool}-${kind === "zip" ? "plates.zip" : "layered.svg"}`;   // named now: another picture may be open by the time it arrives
   try {
     const r = await fetch("/api/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...payload(0), kind})});
     if (!r.ok) { const j = await r.json(); throw new Error(j.error); }
-    const u = URL.createObjectURL(await r.blob()), a = document.createElement("a"); a.href = u; a.download = `${fileName}-${tool}-${kind === "zip" ? "plates.zip" : "layered.svg"}`; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
+    const u = URL.createObjectURL(await r.blob()), a = document.createElement("a"); a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
   } catch (e) { toast(e.message); }
 }
-$("#dl").onclick = () => { const a = document.createElement("a"); a.href = svgURL; a.download = fileName + ".svg"; a.click(); };
+$("#dl").onclick = () => {                           // always this picture's Convert result, never whatever is on screen
+  if (!lastShown) return;
+  const url = URL.createObjectURL(new Blob([lastShown.svg], {type: "image/svg+xml"})), a = document.createElement("a");
+  a.href = url; a.download = fileName + ".svg"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+};
 
 // ---------------------------------------------------------------- viewport
 function setMode(m) {

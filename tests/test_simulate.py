@@ -81,6 +81,172 @@ def test_design_endpoint_and_library_http(server, lineart):
     assert urllib.request.urlopen(server + "/static/simulate.js").status == 200
 
 
+def test_an_out_of_date_list_cant_use_or_delete_another_print():
+    """A print is deleted elsewhere and a different one saved under its name."""
+    prints.save("bolt", _png(300, 150), 280, 140)
+    listed = prints.listing()[0]["id"]
+    assert prints.read("bolt.png", listed)
+    prints.delete("bolt.png", listed)
+    prints.save("bolt", _png(100, 100), 100, 100)                         # another print, same name
+    for act in (lambda: prints.read("bolt.png", listed), lambda: prints.delete("bolt.png", listed)):
+        with pytest.raises(KeyError):
+            act()
+    assert [i["name"] for i in prints.listing()] == ["bolt.png"]         # still there
+    prints.save("same", _png(300, 150), 280, 140)
+    a = {i["name"]: i["id"] for i in prints.listing()}["same.png"]
+    prints.delete("same.png")
+    prints.save("same", _png(300, 150), 100, 50)                          # the same picture at another size
+    with pytest.raises(KeyError):
+        prints.read("same.png", a)
+    prints.delete("same.png")
+    ids = lambda: {i["name"]: i["id"] for i in prints.listing()}         # (by name: the list's order is by date)
+    first = prints.save("twin", _png(300, 150), 280, 140)
+    a = ids()["twin.png"]
+    prints.delete(first)
+    prints.save("twin", _png(300, 150), 280, 140)                         # the very same again, straight away
+    assert ids()["twin.png"] != a                                         # is still another print
+    with pytest.raises(KeyError):
+        prints.delete("twin.png", a)
+    listed = {i["name"]: i for i in prints.listing()}["twin.png"]
+    assert (listed["width_mm"], listed["height_mm"]) == (280, 140)
+    import os
+    f = prints.folder() / "twin.png"
+    st = f.stat()
+    data = bytearray(f.read_bytes())
+    data[-1] ^= 1                                                         # other bytes, same length...
+    f.write_bytes(bytes(data))
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))                      # ...and the same date
+    with pytest.raises(KeyError):
+        prints.read("twin.png", listed["id"])
+    assert prints.read("twin.png", ids()["twin.png"]) == bytes(data)      # a refreshed list works again
+    import shutil
+    listed = ids()["twin.png"]
+    shutil.copy(f, prints.folder() / "copy.tmp")                          # an identical copy put in its place
+    f.unlink()
+    (prints.folder() / "copy.tmp").rename(f)
+    if f.stat().st_ino:
+        with pytest.raises(KeyError):
+            prints.delete("twin.png", listed)
+        assert f.exists()
+    prints.delete("twin.png")
+    prints.save("same", _png(300, 150), 100, 50)
+    (prints.folder() / "odd.png").mkdir()                                 # a folder named like a print
+    assert sorted(i["name"] for i in prints.listing()) == ["bolt.png", "same.png"]
+
+
+def test_print_library_changes_take_turns_with_a_second_boot_tool():
+    import subprocess
+    import sys
+    import time
+    hold = ("import sys, time; from boottool import prints, filelock\n"
+            "with filelock.Turns().held(prints.folder() / prints.LOCK):\n"
+            "    print('held', flush=True); time.sleep(1.5)\n")
+    env = {**__import__("os").environ, "BOOTTOOL_PRINTS": str(prints.folder())}
+    other = subprocess.Popen([sys.executable, "-c", hold], env=env, stdout=subprocess.PIPE, text=True)
+    assert other.stdout.readline().strip() == "held"
+    t0 = time.monotonic()
+    assert prints.save("bolt", _png(300, 150), 280, 140) == "bolt.png"    # waits for the other one, then goes
+    assert time.monotonic() - t0 > 1.0
+    other.wait(10)
+    assert [i["name"] for i in prints.listing()] == ["bolt.png"]
+
+
+def test_print_thumbnails_waiting_for_another_boot_tool_wait_side_by_side(monkeypatch):
+    import subprocess
+    import sys
+    import time
+    from boottool import filelock
+    for n in range(4):
+        prints.save(f"p{n}", _png(30 + n, 15), 280, 140)
+    listed = prints.listing()
+    hold = ("import sys, time; from boottool import prints, filelock\n"
+            "with filelock.Turns().held(prints.folder() / prints.LOCK):\n"
+            "    print('held', flush=True); time.sleep(30)\n")
+    env = {**__import__("os").environ, "BOOTTOOL_PRINTS": str(prints.folder())}
+    other = subprocess.Popen([sys.executable, "-c", hold], env=env, stdout=subprocess.PIPE, text=True)
+    assert other.stdout.readline().strip() == "held"
+    monkeypatch.setattr(filelock, "WAIT", 1.5)
+    try:
+        got = []
+        readers = [threading.Thread(target=lambda i=i: got.append(prints.read(i["name"], i["id"]))) for i in listed]
+        t0 = time.monotonic()
+        for t in readers:
+            t.start()
+        for t in readers:
+            t.join(30)
+        assert len(got) == 4 and time.monotonic() - t0 < 3.5            # together (1.5 s), not 4 x 1.5 s
+    finally:
+        other.kill()
+        other.wait(10)
+
+
+@pytest.mark.parametrize("at", ["the size note", "the picture"])
+def test_a_print_save_cut_short_never_leaves_a_picture_without_its_size(monkeypatch, at):
+    from pathlib import Path
+    real_replace, real_write = Path.replace, Path.write_text
+
+    def replace(self, target):
+        if at == "the picture" and str(target).endswith(".png"):
+            raise SystemExit("killed")
+        return real_replace(self, target)
+
+    def write_text(self, *a, **k):
+        if at == "the size note" and ".json" in self.name:
+            raise SystemExit("killed")
+        return real_write(self, *a, **k)
+    with monkeypatch.context() as m:
+        m.setattr(Path, "replace", replace)
+        m.setattr(Path, "write_text", write_text)
+        with pytest.raises(SystemExit):
+            prints.save("bolt", _png(300, 150), 280, 140)
+    assert all(i["width_mm"] and i["height_mm"] for i in prints.listing())   # no picture without a size
+    assert prints.save("bolt", _png(300, 150), 280, 140).startswith("bolt")  # and saving again works
+    assert all((i["width_mm"], i["height_mm"]) == (280, 140) for i in prints.listing())
+
+
+def test_simulate_tile_from_an_out_of_date_list(server):
+    """The Convert-library tile still says badge.svg, but that item was renamed and another graphic
+    took the name: clicking the old tile must not put the other graphic on the shirt."""
+    from boottool import library
+    sync_api = pytest.importorskip("playwright.sync_api")
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"><rect width="5" height="5"/></svg>'
+    library.save("badge", svg)
+    prints.save("bolt", _png(300, 150), 280, 140)
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        pg_ = b.new_page(viewport={"width": 1400, "height": 850})
+        errors = []
+        pg_.on("pageerror", lambda e: errors.append(str(e)))
+        pg_.goto(server)
+        pg_.click('#nav a[data-t="simulate"]')
+        pg_.wait_for_selector("#ssvg path")
+        pg_.hover("#slib .ltab")
+        pg_.click("[data-lt=convert]")
+        pg_.wait_for_selector("#slibStrip .lt", state="attached")
+        library.rename("badge.svg", "moved")
+        library.save("badge", svg.replace("5", "8"))
+        pg_.locator("#slibStrip .lt").first.dispatch_event("click")       # the old tile
+        pg_.wait_for_function("document.querySelectorAll('#slibStrip .lt').length === 2", timeout=10000)   # list refreshed
+        assert pg_.evaluate("Simulate._S.designs.front.length") == 0      # nothing was put on the shirt
+        pg_.locator('#slibStrip .lt:has-text("moved")').dispatch_event("click")
+        pg_.wait_for_function("Simulate._S.designs.front.length === 1", timeout=10000)   # the refreshed tile works
+
+        pg_.hover("#slib .ltab")                                          # the same for the Print library
+        pg_.click("[data-lt=print]")
+        pg_.wait_for_selector("#slibStrip .lt", state="attached")
+        shown = pg_.evaluate("Simulate._S.prints[0].id")
+        prints.delete("bolt.png")
+        prints.save("bolt", _png(100, 100), 100, 100)
+        pg_.locator("#slibStrip .lt .ltx").first.dispatch_event("click")   # the old tile's ×
+        pg_.wait_for_function("document.body.innerText.includes('Nothing was deleted')", timeout=10000)
+        assert [i["name"] for i in prints.listing()] == ["bolt.png"]
+        pg_.wait_for_function("Simulate._S.prints.length === 1 && Simulate._S.prints[0].id !== " + json.dumps(shown), timeout=10000)   # list refreshed
+        pg_.locator("#slibStrip .lt").first.dispatch_event("click")       # the refreshed tile works
+        pg_.wait_for_function("Simulate._S.designs.front.length === 2", timeout=10000)
+        assert not errors, errors
+        b.close()
+
+
 def test_simulate_in_the_browser(server, lineart, tmp_path):
     sync_api = pytest.importorskip("playwright.sync_api")
     prints.save("bolt", _png(300, 150), 280, 140)

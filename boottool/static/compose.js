@@ -175,9 +175,10 @@ const Compose = (() => {
     it.scale(k, new paper.Point(it.bounds.topLeft));
     it.position = at || new paper.Point(S.W / 2, S.H / 2);
   }
-  async function addFromLibrary(name, at) {
+  async function addFromLibrary(name, at, id) {      // id: the item the tile showed (the name may be another item's by now)
     try {
-      const r = await fetch("/api/library/file?name=" + encodeURIComponent(name)); if (!r.ok) throw new Error("Could not open " + name);
+      const r = await fetch("/api/library/file?name=" + encodeURIComponent(name) + (id ? "&id=" + encodeURIComponent(id) : ""));
+      if (!r.ok) { loadLibrary(); throw new Error("The library has changed, so the list was refreshed. Pick the graphic again."); }
       addSvg(await r.text(), name.replace(/\.svg$/i, ""), at);
     } catch (e) { toast_(e.message); }
   }
@@ -784,7 +785,7 @@ const Compose = (() => {
       e.preventDefault(); e.stopPropagation();
       const r = cv.getBoundingClientRect(), at = paper.view.viewToProject(new paper.Point(e.clientX - r.left, e.clientY - r.top));
       const name = e.dataTransfer.getData("text/x-boot-lib");
-      if (name) return addFromLibrary(name, at);
+      if (name) return addFromLibrary(name, at, e.dataTransfer.getData("text/x-boot-lib-id"));
       for (const f of e.dataTransfer.files) await addFile(f, at);
     });
     document.addEventListener("keydown", keydown); document.addEventListener("keyup", e => { if (e.code === "Space") S.space = false; });
@@ -836,19 +837,31 @@ const Compose = (() => {
     for (const it of items) {
       const t = el("div", "lt"); t.draggable = true;
       t.innerHTML = `<div class="lth"><img loading="lazy" alt="" src="/api/library/file?name=${encodeURIComponent(it.name)}"></div><div class="ltn">${esc(it.name.replace(/\.svg$/i, ""))}</div><span class="ltx" title="Delete from library">×</span>`;
-      t.ondragstart = e => { e.dataTransfer.setData("text/x-boot-lib", it.name); e.dataTransfer.effectAllowed = "copy"; };
-      t.onclick = e => { if (!e.target.classList.contains("ltx")) addFromLibrary(it.name); };
+      t.ondragstart = e => { e.dataTransfer.setData("text/x-boot-lib", it.name); e.dataTransfer.setData("text/x-boot-lib-id", it.id || ""); e.dataTransfer.effectAllowed = "copy"; };
+      let nameClick = null;                          // a click on the name adds too, unless it turns out to be a double-click (rename)
+      t.onclick = e => {
+        if (e.target.closest(".ltx")) return;
+        if (!e.target.closest(".ltn")) return addFromLibrary(it.name, undefined, it.id);
+        if (e.target.isContentEditable) return;
+        clearTimeout(nameClick); nameClick = setTimeout(() => addFromLibrary(it.name, undefined, it.id), 350);
+      };
       t.querySelector(".ltx").onclick = async e => {
         e.stopPropagation();
-        await fetch("/api/library/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: it.name})}); loadLibrary();
+        const r = await fetch("/api/library/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: it.name, id: it.id})});   // id: only if it's still the item this tile shows
+        if (!r.ok) toast_(r.status === 400 ? "The library has changed, so the list was refreshed. Nothing was deleted." : "Not deleted: " + ((await r.json()).error || "the library folder can't be changed"));
+        loadLibrary();
       };
       t.querySelector(".ltn").ondblclick = e => {
+        clearTimeout(nameClick);
         e.stopPropagation(); const n = e.target, old = n.textContent; n.contentEditable = "true"; n.focus(); selectAllIn(n);
         let finished = false;
         const done = async ok => {
           if (finished) return; finished = true;
           n.contentEditable = "false"; const v = n.textContent.trim();
-          if (ok && v && v !== old) await fetch("/api/library/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: it.name, to: v})});
+          if (ok && v && v !== old) {
+            const r = await fetch("/api/library/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: it.name, to: v, id: it.id})});
+            if (!r.ok) toast_(r.status === 400 ? "The library has changed, so the list was refreshed. Nothing was renamed." : "Not renamed: " + ((await r.json()).error || "the library folder can't be changed"));
+          }
           loadLibrary();
         };
         n.onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); done(true); } if (ev.key === "Escape") done(false); }; n.onblur = () => done(true);

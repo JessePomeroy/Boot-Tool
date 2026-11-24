@@ -84,8 +84,8 @@ class Job:
                     (self.dir / it["fname"]).write_text(svg, encoding="utf-8")
                     try:
                         library.save(Path(it["fname"]).stem, svg)           # every result also goes into the library
-                    except (OSError, ValueError):
-                        pass
+                    except (OSError, ValueError) as e:
+                        it["library_error"] = str(e) or type(e).__name__   # converted all the same; say it isn't in the library
                     st = svg_stats(svg)
                     it.update(state="done", bytes=st["bytes"], path_count=st["path_count"], node_count=st["node_count"])
                     if self.out_dir is not None:
@@ -103,7 +103,7 @@ class Job:
     # ------------------------------------------------------------------ views
     def status(self) -> dict:
         items = [{k: it.get(k) for k in ("name", "fname", "state", "bytes", "path_count", "node_count",
-                                         "error", "saved_as")} for it in self.items]
+                                         "error", "saved_as", "library_error")} for it in self.items]
         counts = {s: sum(1 for i in items if i["state"] == s) for s in ("queued", "working", "done", "error", "stopped")}
         return {"job": self.id, "finished": self.finished, "out_dir": str(self.out_dir) if self.out_dir else None,
                 "counts": counts, "items": items}

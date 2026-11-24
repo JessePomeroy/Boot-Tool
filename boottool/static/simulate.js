@@ -126,16 +126,18 @@ const Simulate = (() => {
   const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
   function placeDefault(d) { const g = geo(); d.x = 0; d.y = 7.5 + (g.front ? 0 : 0); }
   async function toData(url) {
-    const blob = await (await fetch(url)).blob();
+    const r = await fetch(url);
+    if (!r.ok) { loadLibs(); throw new Error("The library has changed, so the list was refreshed. Pick the design again."); }
+    const blob = await r.blob();
     return await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(blob); });
   }
   function natSize(data) {
     return new Promise((res, rej) => { const im = new Image(); im.onload = () => res([im.naturalWidth || im.width, im.naturalHeight || im.height]); im.onerror = () => rej(new Error("Could not read that design.")); im.src = data; });
   }
-  async function addDesign(lib, name, widthCm, at) {
+  async function addDesign(lib, name, widthCm, at, id) {   // id: the library item the tile showed (the name may be another item's by now)
     if (cur().length >= MAXPER) return toast(`Up to ${MAXPER} designs on one side.`);
     try {
-      const url = lib === "print" ? `/api/prints/file?name=${encodeURIComponent(name)}` : `/api/library/file?name=${encodeURIComponent(name)}`;
+      const url = (lib === "print" ? "/api/prints/file?name=" : "/api/library/file?name=") + encodeURIComponent(name) + (id ? "&id=" + encodeURIComponent(id) : "");
       let data = await toData(url);
       if (lib === "convert" && !data.startsWith("data:image/svg+xml")) data = "data:image/svg+xml;base64," + data.split(",")[1];
       const [nw, nh] = await natSize(data), g = geo();
@@ -194,7 +196,7 @@ const Simulate = (() => {
   function onUp() { if (!drag) return; drag = null; draw(); renderSideHook && renderSideHook(); }
   function dropOn(e) {
     e.preventDefault(); let j; try { j = JSON.parse(e.dataTransfer.getData("text/x-boot-sim")); } catch (x) { return; }
-    const [px, py] = toCm(e); addDesign(j.lib, j.name, j.w, [px, py]);
+    const [px, py] = toCm(e); addDesign(j.lib, j.name, j.w, [px, py], j.id);
   }
 
   // ------------------------------------------------------------------ side panel
@@ -289,9 +291,14 @@ const Simulate = (() => {
       const t = el("div", "lt"), nm = it.name.replace(/\.(svg|png)$/i, ""), src = S.libTab === "print" ? `/api/prints/file?name=${encodeURIComponent(it.name)}` : `/api/library/file?name=${encodeURIComponent(it.name)}`;
       t.innerHTML = `<div class="lth"><img loading="lazy" alt="" src="${src}"></div><div class="ltn" title="${esc(nm)}">${esc(nm)}</div>${S.libTab === "print" ? '<span class="ltx" title="Delete from Print library">×</span>' : ""}`;
       t.style.cursor = "grab"; t.draggable = true;
-      t.ondragstart = e => { e.dataTransfer.setData("text/x-boot-sim", JSON.stringify({lib: S.libTab, name: it.name, w: S.libTab === "print" && it.width_mm ? it.width_mm / 10 : 0})); e.dataTransfer.effectAllowed = "copy"; };
-      t.onclick = e => { if (e.target.classList.contains("ltx")) return; addDesign(S.libTab, it.name, S.libTab === "print" && it.width_mm ? it.width_mm / 10 : 0); };
-      const x = t.querySelector(".ltx"); if (x) x.onclick = async e => { e.stopPropagation(); await fetch("/api/prints/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: it.name})}); loadLibs(); };
+      t.ondragstart = e => { e.dataTransfer.setData("text/x-boot-sim", JSON.stringify({lib: S.libTab, name: it.name, id: it.id, w: S.libTab === "print" && it.width_mm ? it.width_mm / 10 : 0})); e.dataTransfer.effectAllowed = "copy"; };
+      t.onclick = e => { if (e.target.classList.contains("ltx")) return; addDesign(S.libTab, it.name, S.libTab === "print" && it.width_mm ? it.width_mm / 10 : 0, undefined, it.id); };
+      const x = t.querySelector(".ltx"); if (x) x.onclick = async e => {
+        e.stopPropagation();
+        const r = await fetch("/api/prints/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: it.name, id: it.id})});   // id: only if it's still the print this tile shows
+        if (!r.ok) toast(r.status === 400 ? "The library has changed, so the list was refreshed. Nothing was deleted." : "Not deleted: " + ((await r.json()).error || "the Print library folder can't be changed"));
+        loadLibs();
+      };
       strip.append(t);
     }
   }

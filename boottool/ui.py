@@ -275,14 +275,14 @@ def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServe
                 return self._json(200, {"items": lib.listing(), "folder": str(lib.folder())})
             if url.path == "/api/library/file":
                 try:
-                    return self._send(200, lib.read((q.get("name") or [""])[0]), "image/svg+xml")
+                    return self._send(200, lib.read((q.get("name") or [""])[0], (q.get("id") or [None])[0]), "image/svg+xml")
                 except (ValueError, KeyError) as e:
                     return self._json(404, {"error": str(e).strip("'")})
             if url.path == "/api/prints":
                 return self._json(200, {"items": prints_mod.listing(), "folder": str(prints_mod.folder())})
             if url.path == "/api/prints/file":
                 try:
-                    return self._send(200, prints_mod.read((q.get("name") or [""])[0]), "image/png")
+                    return self._send(200, prints_mod.read((q.get("name") or [""])[0], (q.get("id") or [None])[0]), "image/png")
                 except (ValueError, KeyError) as e:
                     return self._json(404, {"error": str(e).strip("'")})
             if url.path == "/api/fonts":
@@ -327,17 +327,25 @@ def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServe
                                            float(req.get("height_mm", 0)), str(req.get("garment") or ""))
                     return self._json(200, {"name": name, "folder": str(prints_mod.folder())})
                 if self.path == "/api/prints/delete":
-                    prints_mod.delete(str(json.loads(body).get("name", "")))
+                    req = json.loads(body)
+                    prints_mod.delete(str(req.get("name", "")), req.get("id") and str(req["id"]))
                     return self._json(200, {"ok": True})
                 if self.path == "/api/library/save":
                     req = json.loads(body)
-                    name = lib.save(str(req.get("name") or "graphic"), str(req.get("svg") or ""), req.get("key") and str(req["key"]))
-                    return self._json(200, {"name": name, "folder": str(lib.folder())})
+                    rev = req.get("rev")
+                    name, named = lib.save_named(str(req.get("name") or "graphic"), str(req.get("svg") or ""),
+                                                 req.get("key") and str(req["key"]),
+                                                 rev if isinstance(rev, int) else None, bool(req.get("rename")))
+                    # renamed: False when it is saved but its item couldn't take the name (the page asks again)
+                    return self._json(200, {"name": name, "folder": str(lib.folder()), "renamed": named})
                 if self.path == "/api/library/rename":
                     req = json.loads(body)
-                    return self._json(200, {"name": lib.rename(str(req.get("name", "")), str(req.get("to", "")))})
+                    return self._json(200, {"name": lib.rename(str(req.get("name", "")), str(req.get("to", "")),
+                                                               req.get("key") and str(req["key"]),
+                                                               req.get("id") and str(req["id"]))})
                 if self.path == "/api/library/delete":
-                    lib.delete(str(json.loads(body).get("name", "")))
+                    req = json.loads(body)
+                    lib.delete(str(req.get("name", "")), req.get("id") and str(req["id"]))
                     return self._json(200, {"ok": True})
                 if self.path == "/api/text":
                     req = json.loads(body)
@@ -356,7 +364,7 @@ def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServe
                     req = json.loads(body)
                     res = engine.trace(req["id"], req.get("params", {}),
                                        str(req.get("session", "")), int(req.get("seq", 0)))
-                    return self._send(204, b"") if res is None else self._json(200, res)
+                    return self._send(204, b"") if res is None else self._json(200, {**res, "rev": lib.tick()})
                 self._json(404, {"error": "not found"})
             except (ValueError, KeyError) as e:
                 self._json(400, {"error": str(e).strip("'")})
