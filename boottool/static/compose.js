@@ -482,9 +482,15 @@ const Compose = (() => {
     if (ps.length < 2) return toast_("Select an open line, or two open lines.");
     let a = ps[0];
     for (const b of ps.slice(1)) {
-      const ea = [a.firstSegment.point, a.lastSegment.point], eb = [b.firstSegment.point, b.lastSegment.point];
-      let d = Infinity; for (const x of ea) for (const y of eb) d = Math.min(d, x.getDistance(y));
-      a.join(b, d + 1e-6);                               // connect the two nearest ends, without also closing the loop
+      // The two nearest ends are connected. Each line is turned so that those are a's end and b's start; then b's points
+      // follow a's. Both end points stay (they used to be made into one point, which moved the line), unless they are one already.
+      let near = null;
+      for (const ra of [false, true]) for (const rb of [false, true]) {
+        const d = (ra ? a.firstSegment : a.lastSegment).point.getDistance((rb ? b.lastSegment : b.firstSegment).point);
+        if (!near || d < near.d) near = {d, ra, rb};
+      }
+      if (near.ra) a.reverse(); if (near.rb) b.reverse();
+      a.join(b);
     }
     commit(); select([topOf(a)]);
   }
