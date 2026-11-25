@@ -590,8 +590,8 @@ function bindConvert() {
   else P.convert = SHARED;
 }
 async function addFiles(files) {
+  files = [...files].filter(isImg); if (!files.length) return;             // taken down now: the box they were chosen in is emptied the next moment
   try { await READY; } catch (e) { return toast(e.message); }               // (the settings first: see "boot")
-  files = [...files].filter(isImg); if (!files.length) return;
   BATCH.adding += files.length; setMode("batch"); let bad = 0;
   for (const f of files) {
     try {

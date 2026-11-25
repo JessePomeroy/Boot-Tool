@@ -417,6 +417,27 @@ def test_if_the_settings_never_arrive_the_page_says_so(server, lineart):
         b.close()
 
 
+def test_add_images_in_the_batch_view_adds_them(server, lineart, tmp_path):
+    """"Add images" empties its file box as soon as the pictures are chosen. Waiting for the settings
+    before taking the pictures down lost them all: nothing was added, without a word."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    second = tmp_path / "second.png"
+    second.write_bytes(lineart.read_bytes())
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.goto(server + "/")
+        page.wait_for_function("document.querySelector('#ver').textContent.length > 1")   # the settings are here
+        page.click("#toolbar [data-m=batch]")
+        page.set_input_files("#side input[type=file][multiple]:not([webkitdirectory])", [str(lineart), str(second)])
+        page.wait_for_function("BATCH.items.length === 2 && !BATCH.adding", timeout=60000)
+        assert page.evaluate("BATCH.items.map(i => i.name)") == ["line.png", "second.png"]
+        assert not errs, errs
+        b.close()
+
+
 def test_names_with_html_are_shown_as_text(server):
     """A graphic's name comes from its file name; it must be shown as written, never run as part of the page."""
     sync_api = pytest.importorskip("playwright.sync_api")
