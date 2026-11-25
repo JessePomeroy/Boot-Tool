@@ -450,7 +450,11 @@ def _plate_specs(rgb: np.ndarray, p: PrintParams, W: int, H: int, aw: float = 0.
                 region = _design_region(plane, mm_px, p.outline_mm)
                 plane = (1 - plane) * cv2.GaussianBlur(region.astype(np.float32), (0, 0), 0.6)
             if p.underbase and not _is_white(p.ink):
-                ub = _underbase_mask(plane, mm_px)
+                # The white goes under what prints: the picture after Tone (brightness, contrast, invert),
+                # which the ink plate is made from too (after smoothing it, if that is set). Taken from
+                # the picture before Tone, the white lay under the wrong half of an inverted picture, and
+                # under greys that Tone had turned to no ink.
+                ub = _underbase_mask(ht._tone(np.clip(plane, 0, 1), p), mm_px)
                 return ([("White underbase", "#ffffff", 0.0), ("Ink", p.ink, p.angle)],
                         (lambda i: ub if i == 0 else plane), {"garment": p.dark_bg})
             return [("Ink", p.ink, p.angle)], (lambda i: plane), {"garment": p.dark_bg}
