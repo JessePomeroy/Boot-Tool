@@ -544,9 +544,13 @@ const Compose = (() => {
     for (const it of S.sel) it.translate(new paper.Point(dx, dy)); commit(); drawUI(); syncProps();
   }
   function order(kind) {
-    for (const it of kind === "front" || kind === "up" ? S.sel.slice() : S.sel.slice().reverse()) {
+    // Taken in their order in the stack, not the order they were clicked in (which made two neighbours swap and swap
+    // back: nothing moved). A shape only passes one that is not selected too, so shapes selected together move together.
+    const sel = new Set(S.sel), by = S.sel.slice().sort((a, b) => zIndex(a) - zIndex(b));
+    for (const it of kind === "front" || kind === "down" ? by : by.reverse()) {
       if (kind === "front") it.bringToFront(); else if (kind === "back") it.sendToBack();
-      else if (kind === "up" && it.nextSibling) it.insertAbove(it.nextSibling); else if (kind === "down" && it.previousSibling) it.insertBelow(it.previousSibling);
+      else if (kind === "up" && it.nextSibling && !sel.has(it.nextSibling)) it.insertAbove(it.nextSibling);
+      else if (kind === "down" && it.previousSibling && !sel.has(it.previousSibling)) it.insertBelow(it.previousSibling);
     }
     commit(); renderSide();
   }
