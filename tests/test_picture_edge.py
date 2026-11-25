@@ -310,3 +310,97 @@ def test_a_curve_beside_the_edge_of_the_picture_does_not_bulge_over_it(tmp_path)
     assert [p.name for p in j.plates] == ["Red"]
     assert j.plates[0].body.count("C") > 5
     assert beyond_the_picture(j, j.plates[0]) < 0.03
+
+
+# ---------------------------------------------------------------- screened plates (halftones)
+
+def _window(tmp_path):
+    """A picture that is black up to all four sides, with a white window in its middle."""
+    a = np.full((60, 60, 3), 0, np.uint8)
+    a[20:40, 20:40] = 255
+    f = tmp_path / "window.png"
+    Image.fromarray(a).save(f)
+    return f
+
+
+def _ink_at_the_sides_and_in_the_middle(job, plate):
+    """(share of ink in a band just inside the picture's four sides, share of ink in its middle)."""
+    ink = plate_mask(job, plate, 10)
+    h, w = ink.shape
+    band = np.zeros_like(ink)
+    band[30:60, 30:-30] = band[-60:-30, 30:-30] = band[30:-30, 30:60] = band[30:-30, -60:-30] = True   # 1 to 4 mm inside the picture
+    assert not ink[:19].any() and not ink[-19:].any() and not ink[:, :19].any() and not ink[:, -19:].any()   # (and none outside it)
+    return ink[band].mean(), ink[h // 2 - 50:h // 2 + 50, w // 2 - 50:w // 2 + 50].mean()
+
+
+@pytest.mark.parametrize("edge", [0.5, 1.0, 2.0])
+def test_screened_ink_at_the_edge_of_the_picture_is_not_drawn_inside_out(tmp_path, edge):
+    """One ink, screened, solid up to the picture's sides, with "Edge" smoothing turned up. The
+    plate's outer outline lies on the picture's edge; from an Edge of about 0.8 it was lost, and the
+    plate came out as its opposite: ink in the white window, none around it. (At 0.5 it was right.)"""
+    j = pr.build(_window(tmp_path), pr.PrintParams(method="one", ink="#000000", render="screen", edge=edge), pg.PageOpts())
+    sides, middle = _ink_at_the_sides_and_in_the_middle(j, j.plates[0])
+    assert sides > 0.97 and middle < 0.03, (sides, middle)
+
+
+def test_screened_ink_at_the_edge_in_cmyk_and_in_the_halftone_tool(tmp_path):
+    """The same for a CMYK job and for the Halftone tool, which trace their screens the same way.
+    (Black in CMYK is made of all four inks; cyan, magenta and yellow are solid in it.)"""
+    from boottool import halftone as ht
+    f = _window(tmp_path)
+    j = pr.build(f, pr.PrintParams(method="cmyk", render="screen", edge=2.0), pg.PageOpts())
+    assert [p.name for p in j.plates] == ["Cyan", "Magenta", "Yellow", "Black"]
+    for plate in j.plates[:3]:
+        sides, middle = _ink_at_the_sides_and_in_the_middle(j, plate)
+        assert sides > 0.97 and middle < 0.03, (plate.name, sides, middle)
+    j = ht.build(f, ht.HalftoneParams(edge=2.0), pg.PageOpts())
+    sides, middle = _ink_at_the_sides_and_in_the_middle(j, j.plates[0])
+    assert sides > 0.97 and middle < 0.03, (sides, middle)
+
+
+def _outlines_away_from_the_sides(job, plate):
+    """The outlines of a plate's path that keep a pixel away from the picture's sides, as written."""
+    sx, d = re.search(r'scale\(([\d.]+)[^)]*\)"><path[^>]* d="([^"]+)"', plate.body).groups()
+    w, h = job.art[2] / float(sx), job.art[3] / float(sx)
+    out = []
+    for sub in d.split("M")[1:]:
+        n = np.array([float(v) for v in re.findall(r"-?[\d.]+", sub)]).reshape(-1, 2)
+        if n.min() > 1 and n[:, 0].max() < w - 2 and n[:, 1].max() < h - 2:  # (the plate's grid can be a pixel larger than the artwork)
+            out.append(sub)
+    return out
+
+
+def test_screens_away_from_the_edge_are_not_touched(tmp_path, monkeypatch):
+    """Tracing screens with the edge in mind changes nothing away from the picture's sides. A
+    picture whose dots keep away from them gives the same plates, character for character; and in
+    a tint that runs up to the sides, every dot that is a pixel or more inside is the same too.
+    (One ink, CMYK and the Halftone tool.)"""
+    from boottool import halftone as ht
+    a = np.full((80, 80, 3), 255, np.uint8)
+    yy, xx = np.mgrid[0:80, 0:80]
+    a[(xx - 40) ** 2 + (yy - 40) ** 2 < 28 ** 2] = 90                       # a grey disc, a margin of white round it
+    a[30:50, 30:50] = 0
+    f = tmp_path / "disc.png"
+    Image.fromarray(a).save(f)
+    g = tmp_path / "tint.png"
+    Image.fromarray(np.full((80, 80, 3), 150, np.uint8)).save(g)             # a tint all over: dots on every side
+    small = pg.PageOpts(art_w=60.0)                                         # (a small print: a few thousand dots, to keep this quick)
+    builds = {"one": lambda src: pr.build(src, pr.PrintParams(method="one", ink="#000000", render="screen"), small),
+              "cmyk": lambda src: pr.build(src, pr.PrintParams(method="cmyk", render="screen"), small),
+              "halftone": lambda src: ht.build(src, ht.HalftoneParams(), small)}
+    now = {k: (b(f), b(g)) for k, b in builds.items()}
+    real = tr.mask_to_path
+    for module in (pr, ht):
+        monkeypatch.setattr(module, "mask_to_path", lambda mask, p, fast=False, edge=False: real(mask, p, fast))
+    before = {k: (b(f), b(g)) for k, b in builds.items()}
+    for k in builds:
+        assert [p.body for p in now[k][0].plates] == [p.body for p in before[k][0].plates], k
+        assert len(now[k][0].plates[-1].body) > 1000
+        changed = 0
+        for new, old in zip(now[k][1].plates, before[k][1].plates):         # the tint: different at the sides, the same inside
+            if not new.body and not old.body:
+                continue                                                    # (an ink with nothing to print in this grey)
+            inside = _outlines_away_from_the_sides(now[k][1], new)
+            assert inside == _outlines_away_from_the_sides(before[k][1], old), (k, new.name)
+            changed += new.body != old.body and len(inside) > 200
+        assert changed, k                                                   # (there were dots on the sides, and dots inside to compare)

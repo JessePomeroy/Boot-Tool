@@ -600,7 +600,7 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
         masks, sw, sh = solid
         if not masks[i].any():
             return "", 0
-        sd = mask_to_path(masks[i], Params(speckle=0, smooth_sigma=0.6, epsilon=0.8, corner_deg=125.0, precision=1), fast=p.draft)
+        sd = mask_to_path(masks[i], Params(speckle=0, smooth_sigma=0.6, epsilon=0.8, corner_deg=125.0, precision=1), fast=p.draft, edge=True)
         return ((f'<g transform="translate({ax:.3f} {ay:.3f}) scale({aw / sw:.6f} {ah / sh:.6f})">'
                  f'<path fill-rule="evenodd" d="{sd}"/></g>') if sd else ""), sd.count("M")
 
@@ -610,7 +610,7 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
         if specs[i][0] == "White underbase":                       # a solid, never screened
             t = np.where(_to_grid(plane(i), W, H, 0) > 0.5, 1.0, 0.0).astype(np.float32)
         if p.render == "screen":
-            d = mask_to_path(ht._screen(t, cell_px, ang, table, p.shape, stamp), tp, fast=p.draft)
+            d = mask_to_path(ht._screen(t, cell_px, ang, table, p.shape, stamp), tp, fast=p.draft, edge=True)   # (ink at the picture's edge is outlined along it)
             body = (f'<g transform="translate({ax:.3f} {ay:.3f}) scale({px_mm:.6f})">'
                     f'<path fill-rule="evenodd" d="{d}"/></g>') if d else ""
             sb, sn = solid_body(i)
