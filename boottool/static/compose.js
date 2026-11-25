@@ -467,9 +467,12 @@ const Compose = (() => {
   }
   function zIndex(it) { let z = 0, t = it; const chain = []; while (t && t !== L.art) { chain.unshift(t.index); t = t.parent; } chain.forEach((v, i) => z += v / Math.pow(1e4, i)); return z; }
   function replaceWith(olds, news) {
-    const tops = [...new Set(olds.map(topOf))], idx = Math.max(...tops.map(t => t.index));
+    const tops = [...new Set(olds.map(topOf))], top = tops.reduce((a, b) => b.index > a.index ? b : a), above = top.nextSibling;
     for (const o of olds) o.remove();
     for (const t of tops) if (t.parent && t.children && !t.children.length) t.remove();
+    // the result takes the place of the front-most shape that went into it: under whatever was above that one (the
+    // place used to be counted before the shapes were taken out, which put the result above shapes that were above them)
+    const idx = above && above.parent === L.art ? above.index : top.parent === L.art ? top.index + 1 : L.art.children.length;
     const made = news.map(n => { L.art.insertChild(Math.min(idx, L.art.children.length), n); n.applyMatrix = true; return place(n, "shape", "Shape"); });
     commit(); select(made);
   }
