@@ -1,7 +1,6 @@
 """Compose: combining shapes, moving them forward and back in the stack, and joining lines."""
 import pytest
 
-from test_compose import server  # noqa: F401 (a fixture)
 
 FIVE = """(() => { const A = Compose._api, L = A.getL(); L.art.removeChildren();
   const r = (n, x, y, w, h) => { const p = new paper.Path.Rectangle({point: [x, y], size: [w, h], fillColor: '#000'}); p.data = {name: n, kind: 'shape'}; p.name = n; L.art.addChild(p); return p; };
@@ -11,26 +10,18 @@ STACK = "Compose._api.getL().art.children.map(c => c.data.name)"
 
 
 @pytest.fixture
-def compose(server):
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+def compose(server, page):
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
 
-        def after(selected, button):
-            """Five squares, these ones selected (in this order), that button pressed: the stack from back to front."""
-            page.evaluate(FIVE)
-            page.evaluate(f"Compose._api.select([{', '.join('IT.' + n for n in selected)}])")
-            page.click(f"#side .btn:text-is('{button}'), #side span:text-is('{button}')")
-            return page.evaluate(STACK)
-        yield page, after
-        assert not errs, errs
-        b.close()
+    def after(selected, button):
+        """Five squares, these ones selected (in this order), that button pressed: the stack from back to front."""
+        page.evaluate(FIVE)
+        page.evaluate(f"Compose._api.select([{', '.join('IT.' + n for n in selected)}])")
+        page.click(f"#side .btn:text-is('{button}'), #side span:text-is('{button}')")
+        return page.evaluate(STACK)
+    yield page, after
 
 
 def test_a_combined_shape_takes_the_place_of_the_shapes_it_was_made_from(compose):

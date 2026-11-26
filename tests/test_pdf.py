@@ -9,9 +9,6 @@ import json
 import re
 import shutil
 import subprocess
-import threading
-import urllib.error
-import urllib.request
 import zipfile
 import zlib
 
@@ -25,7 +22,7 @@ from boottool import page as pg
 from boottool import pdf
 from boottool import printing as pr
 from boottool import separate as sep
-from boottool.ui import make_server
+from conftest import call as _post
 
 K = 72 / 25.4                                                             # points in a millimetre
 
@@ -334,24 +331,6 @@ def test_the_pdf_looks_like_the_svg_in_a_real_pdf_reader(color, tmp_path):
         assert b.sum() > 20000 and int(((a != b) & ~edge).sum()) == 0
 
 
-@pytest.fixture
-def server():
-    srv = make_server("127.0.0.1", 0)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
-    srv.shutdown()
-    srv.server_close()
-
-
-def _post(url, data, ctype="application/json"):
-    req = urllib.request.Request(url, data=data if isinstance(data, bytes) else json.dumps(data).encode(), method="POST", headers={"Content-Type": ctype})
-    try:
-        with urllib.request.urlopen(req) as r:
-            return r.status, r.read(), r.headers
-    except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers
-
-
 def test_downloading_pdfs_from_boot_tool(server, color):
     iid = json.loads(_post(server + "/api/upload", color.read_bytes(), "application/octet-stream")[1])["id"]
     req = {"id": iid, "tool": "separate", "params": {"inks": 3}, "page": {"size": "A5", "orientation": "portrait"}}
@@ -370,42 +349,34 @@ def test_downloading_pdfs_from_boot_tool(server, color):
     assert _post(server + "/api/download", {**req, "kind": "zip"})[2]["Content-Type"] == "application/zip"
 
 
-def test_the_pdf_buttons_in_the_browser(server, color, tmp_path):
+def test_the_pdf_buttons_in_the_browser(server, color, tmp_path, page):
     """Print has two more download buttons; each gives a file named after the picture."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900}, accept_downloads=True)
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        one, zipped = "button:text-is('PDF — one page per plate')", "button:text-is('All plates — .zip, one PDF each')"
-        page.click('a[data-t="print"]')
-        page.wait_for_selector(one)
-        assert page.is_disabled(one) and page.is_disabled(zipped)          # nothing to download yet
-        page.set_input_files("#file", str(color))
-        page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
-        page.wait_for_function("(b => b.length === 2 && b.every(x => !x.disabled))([...document.querySelectorAll('button')].filter(x => x.textContent.includes('PDF')))", timeout=20000)
-        note = "document.querySelector('#toast').textContent"
-        held = []
-        page.route("**/api/download", lambda route: held.append(route))    # Boot Tool's answer is held back for a moment
-        page.click(one)
-        page.wait_for_function(f"{note} === 'Making the PDF…'")
-        page.click(zipped)                                                 # a click while one is being made does not start another
-        page.wait_for_function(f"{note} === 'Still making the PDF…'")
-        page.wait_for_timeout(300)
-        assert len(held) == 1 and held[0].request.post_data_json["kind"] == "pdf"
-        with page.expect_download(timeout=120000) as d:
-            held[0].continue_()
-        page.unroute("**/api/download")
-        assert d.value.suggested_filename == "color-print-plates.pdf"
-        d.value.save_as(tmp_path / "one.pdf")
-        assert len(read_pdf((tmp_path / "one.pdf").read_bytes())) == page.evaluate("lastRes.plates.length")
-        page.wait_for_function("document.querySelector('#toast').textContent === 'PDF downloaded.'", timeout=20000)
-        with page.expect_download(timeout=120000) as d:
-            page.click(zipped)
-        assert d.value.suggested_filename == "color-print-plates-pdf.zip"
-        d.value.save_as(tmp_path / "all.zip")
-        assert [n[-4:] for n in zipfile.ZipFile(tmp_path / "all.zip").namelist()] == [".pdf"] * page.evaluate("lastRes.plates.length")
-        assert not errs, errs
-        b.close()
+    page.goto(server + "/")
+    one, zipped = "button:text-is('PDF — one page per plate')", "button:text-is('All plates — .zip, one PDF each')"
+    page.click('a[data-t="print"]')
+    page.wait_for_selector(one)
+    assert page.is_disabled(one) and page.is_disabled(zipped)          # nothing to download yet
+    page.set_input_files("#file", str(color))
+    page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
+    page.wait_for_function("(b => b.length === 2 && b.every(x => !x.disabled))([...document.querySelectorAll('button')].filter(x => x.textContent.includes('PDF')))", timeout=20000)
+    note = "document.querySelector('#toast').textContent"
+    held = []
+    page.route("**/api/download", lambda route: held.append(route))    # Boot Tool's answer is held back for a moment
+    page.click(one)
+    page.wait_for_function(f"{note} === 'Making the PDF…'")
+    page.click(zipped)                                                 # a click while one is being made does not start another
+    page.wait_for_function(f"{note} === 'Still making the PDF…'")
+    page.wait_for_timeout(300)
+    assert len(held) == 1 and held[0].request.post_data_json["kind"] == "pdf"
+    with page.expect_download(timeout=120000) as d:
+        held[0].continue_()
+    page.unroute("**/api/download")
+    assert d.value.suggested_filename == "color-print-plates.pdf"
+    d.value.save_as(tmp_path / "one.pdf")
+    assert len(read_pdf((tmp_path / "one.pdf").read_bytes())) == page.evaluate("lastRes.plates.length")
+    page.wait_for_function("document.querySelector('#toast').textContent === 'PDF downloaded.'", timeout=20000)
+    with page.expect_download(timeout=120000) as d:
+        page.click(zipped)
+    assert d.value.suggested_filename == "color-print-plates-pdf.zip"
+    d.value.save_as(tmp_path / "all.zip")
+    assert [n[-4:] for n in zipfile.ZipFile(tmp_path / "all.zip").namelist()] == [".pdf"] * page.evaluate("lastRes.plates.length")

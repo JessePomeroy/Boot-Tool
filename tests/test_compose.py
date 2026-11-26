@@ -1,42 +1,14 @@
 """Library, fonts, text outlines and custom page size (the server side of Compose), plus a browser smoke test."""
 import json
-import threading
-import urllib.error
 import urllib.request
 
 import pytest
 
 from boottool import fonts, library
 from boottool import page as pg
-from boottool.ui import make_server
+from conftest import call as _get, call_json as _post
 
 SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"><rect width="5" height="5"/></svg>'
-
-
-@pytest.fixture
-def server():
-    srv = make_server("127.0.0.1", 0)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
-    srv.shutdown()
-    srv.server_close()
-
-
-def _post(url, data):
-    req = urllib.request.Request(url, data=json.dumps(data).encode(), method="POST", headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req) as r:
-            return r.status, json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
-
-
-def _get(url):
-    try:
-        with urllib.request.urlopen(url) as r:
-            return r.status, r.read(), r.headers
-    except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers
 
 
 def test_library_keys_overwrite_and_names_are_unique():
@@ -125,40 +97,32 @@ def test_text_endpoint(server):
     assert _post(server + "/api/text", {"font": fid, "text": "", "size": 20})[0] == 400
 
 
-def test_edited_text_keeps_its_own_font(server):
+def test_edited_text_keeps_its_own_font(server, page):
     """Picking a font for new text must not redraw existing text in it; picking a font for selected text does."""
     _make_font(fonts.user_folder() / "TestSans.ttf")
     _make_font(fonts.user_folder() / "TestWide.ttf", family="Test Wide", advance=1200)
     fonts.listing(refresh=True)
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        w = page.evaluate("""async () => {
-          const A = Compose._api, S = Compose._S, L = A.getL(), wait = () => new Promise(r => setTimeout(r, 1200));
-          const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
-          const narrow = S.fonts.find(f => f.family === 'Test Sans'), wide = S.fonts.find(f => f.family === 'Test Wide');
-          S.font = narrow; S.text.text = 'AAAA';
-          await A.addText(new paper.Point(20, 20));
-          const t = L.art.lastChild, own = t.bounds.width;
-          S.font = wide;                                   // the font chosen for the NEXT text
-          A.retext(t, {spacing: 0}); await wait();         // then the first text is edited without touching its font
-          const kept = L.art.lastChild.bounds.width;
-          A.select([L.art.lastChild]);
-          return {own, kept, font: L.art.lastChild.data.text.font, narrow: narrow.id, wide: wide.id};
-        }""")
-        assert abs(w["kept"] - w["own"]) < 0.01 and w["font"] == w["narrow"], w      # used to be redrawn in Test Wide
-        page.select_option("#side select", str(w["wide"]))                         # choosing a font for the selected text still works
-        page.wait_for_timeout(1200)
-        wider = page.evaluate("[Compose._api.getL().art.lastChild.bounds.width, Compose._api.getL().art.lastChild.data.text.font]")
-        assert wider[0] > w["own"] * 1.5 and wider[1] == w["wide"], wider
-        assert not errs, errs
-        b.close()
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    w = page.evaluate("""async () => {
+      const A = Compose._api, S = Compose._S, L = A.getL(), wait = () => new Promise(r => setTimeout(r, 1200));
+      const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
+      const narrow = S.fonts.find(f => f.family === 'Test Sans'), wide = S.fonts.find(f => f.family === 'Test Wide');
+      S.font = narrow; S.text.text = 'AAAA';
+      await A.addText(new paper.Point(20, 20));
+      const t = L.art.lastChild, own = t.bounds.width;
+      S.font = wide;                                   // the font chosen for the NEXT text
+      A.retext(t, {spacing: 0}); await wait();         // then the first text is edited without touching its font
+      const kept = L.art.lastChild.bounds.width;
+      A.select([L.art.lastChild]);
+      return {own, kept, font: L.art.lastChild.data.text.font, narrow: narrow.id, wide: wide.id};
+    }""")
+    assert abs(w["kept"] - w["own"]) < 0.01 and w["font"] == w["narrow"], w      # used to be redrawn in Test Wide
+    page.select_option("#side select", str(w["wide"]))                         # choosing a font for the selected text still works
+    page.wait_for_timeout(1200)
+    wider = page.evaluate("[Compose._api.getL().art.lastChild.bounds.width, Compose._api.getL().art.lastChild.data.text.font]")
+    assert wider[0] > w["own"] * 1.5 and wider[1] == w["wide"], wider
 
 
 def test_a_font_keeps_its_id_when_other_fonts_come_and_go(server):
@@ -301,155 +265,139 @@ def _wait_for_width(page, want):
     page.wait_for_function("w => Math.abs(Compose._api.getL().art.lastChild.bounds.width - w) < 0.05", arg=want, timeout=20000)
 
 
-def test_refresh_fonts_leaves_existing_text_in_its_font(server):
+def test_refresh_fonts_leaves_existing_text_in_its_font(server, page):
     """Text is on the page, a new font is installed, and "Refresh fonts" is pressed. Editing the text
     afterwards used to redraw it in whichever font had taken its place in the list."""
     _make_font(fonts.user_folder() / "TestSans.ttf")
     _make_font(fonts.user_folder() / "TestWide.ttf", family="Test Wide", advance=1200)
     fonts.listing(refresh=True)
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        own, em = page.evaluate("""async () => {
-          const A = Compose._api, S = Compose._S, L = A.getL();
-          const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
-          S.font = S.fonts.find(f => f.family === 'Test Wide'); S.text.text = 'AAAA';
-          await A.addText(new paper.Point(20, 20));
-          A.select([L.art.lastChild]);
-          return [L.art.lastChild.bounds.width, S.text.size * 25.4 / 72];
-        }""")
-        assert abs(own - 4.0 * em) < 0.05                                 # three steps of 1.2 em and a letter 0.4 em wide
-        shown = "(() => { const s = document.querySelector('#side select'); return s.options[s.selectedIndex].textContent; })()"
-        assert page.evaluate(shown).startswith("Test Wide")
-        _make_font(fonts.user_folder() / "First.ttf", family="A First Font", advance=300)   # sorts before both
-        page.click("#side .bsm:text('Refresh fonts')")
-        page.wait_for_function("Compose._S.fonts.length === 3")
-        assert page.evaluate(shown).startswith("Test Wide")              # the panel still names the text's own font
-        assert page.evaluate("Compose._S.font.family") == "Test Wide"    # and new text still gets the font that was picked
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 100})")   # the text is edited
-        _wait_for_width(page, own + 0.3 * em)                            # redrawn in Test Wide (in Test Sans: 2.5 em)
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    own, em = page.evaluate("""async () => {
+      const A = Compose._api, S = Compose._S, L = A.getL();
+      const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
+      S.font = S.fonts.find(f => f.family === 'Test Wide'); S.text.text = 'AAAA';
+      await A.addText(new paper.Point(20, 20));
+      A.select([L.art.lastChild]);
+      return [L.art.lastChild.bounds.width, S.text.size * 25.4 / 72];
+    }""")
+    assert abs(own - 4.0 * em) < 0.05                                 # three steps of 1.2 em and a letter 0.4 em wide
+    shown = "(() => { const s = document.querySelector('#side select'); return s.options[s.selectedIndex].textContent; })()"
+    assert page.evaluate(shown).startswith("Test Wide")
+    _make_font(fonts.user_folder() / "First.ttf", family="A First Font", advance=300)   # sorts before both
+    page.click("#side .bsm:text('Refresh fonts')")
+    page.wait_for_function("Compose._S.fonts.length === 3")
+    assert page.evaluate(shown).startswith("Test Wide")              # the panel still names the text's own font
+    assert page.evaluate("Compose._S.font.family") == "Test Wide"    # and new text still gets the font that was picked
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 100})")   # the text is edited
+    _wait_for_width(page, own + 0.3 * em)                            # redrawn in Test Wide (in Test Sans: 2.5 em)
 
-        # Another version of the text's font is installed, in a file that comes first: the list shows
-        # that one, and the text keeps its own.
-        _make_font(fonts.user_folder() / "A-Wide.ttf", family="Test Wide", advance=900)
-        page.click("#side .bsm:text('Refresh fonts')")
-        page.wait_for_function("Compose._S.fontsOther.length === 1")
-        assert page.evaluate("Compose._S.fonts.length") == 3
-        assert page.evaluate(shown) == "Test Wide — Regular (another version)"
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 200})")
-        _wait_for_width(page, own + 0.6 * em)                            # still in its own version (the listed one: 3.7 em)
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 100})")
-        _wait_for_width(page, own + 0.3 * em)
+    # Another version of the text's font is installed, in a file that comes first: the list shows
+    # that one, and the text keeps its own.
+    _make_font(fonts.user_folder() / "A-Wide.ttf", family="Test Wide", advance=900)
+    page.click("#side .bsm:text('Refresh fonts')")
+    page.wait_for_function("Compose._S.fontsOther.length === 1")
+    assert page.evaluate("Compose._S.fonts.length") == 3
+    assert page.evaluate(shown) == "Test Wide — Regular (another version)"
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 200})")
+    _wait_for_width(page, own + 0.6 * em)                            # still in its own version (the listed one: 3.7 em)
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 100})")
+    _wait_for_width(page, own + 0.3 * em)
 
-        page.fill("#side textarea", "")                                  # the box is emptied on the way to typing something else
-        page.wait_for_timeout(800)
-        assert page.evaluate("document.activeElement.tagName") == "TEXTAREA"   # it stays as it is, with the cursor in it,
-        assert page.evaluate("document.querySelector('#toast').style.display") != "block"   # and nothing complains
-        assert page.evaluate("Compose._api.getL().art.lastChild.data.text.text") == "AAAA"
-        page.evaluate("document.activeElement.blur()")
-        assert page.input_value("#side textarea") == "AAAA"              # left empty, it shows the text again
+    page.fill("#side textarea", "")                                  # the box is emptied on the way to typing something else
+    page.wait_for_timeout(800)
+    assert page.evaluate("document.activeElement.tagName") == "TEXTAREA"   # it stays as it is, with the cursor in it,
+    assert page.evaluate("document.querySelector('#toast').style.display") != "block"   # and nothing complains
+    assert page.evaluate("Compose._api.getL().art.lastChild.data.text.text") == "AAAA"
+    page.evaluate("document.activeElement.blur()")
+    assert page.input_value("#side textarea") == "AAAA"              # left empty, it shows the text again
 
-        (fonts.user_folder() / "TestWide.ttf").unlink()                  # its font is taken away
-        page.click("#side .bsm:text('Refresh fonts')")
-        page.wait_for_function("Compose._S.fontsOther.length === 0")
-        assert page.evaluate(shown) == "Test Wide Regular — not installed"   # it says so, rather than naming another font
-        assert page.evaluate("document.querySelector('#side select').options[0].disabled")   # (and that can't be picked)
-        page.evaluate("""() => { const A = Compose._api, t = A.getL().art.lastChild;
-          A.retext(t, {text: 'AA', spacing: 0}); A.rotateSel(90); }""")   # an edit, and before it is refused the text is turned
-        page.wait_for_function("document.querySelector('#toast') && /not installed/.test(document.querySelector('#toast').textContent)", timeout=10000)
-        assert page.evaluate("(({text, spacing, rot}) => [text, spacing, rot])(Compose._api.getL().art.lastChild.data.text)") == ["AAAA", 100, 90]   # as it was, and still turned
-        tall = page.evaluate("Compose._api.getL().art.lastChild.bounds.height")
-        assert abs(tall - (own + 0.3 * em)) < 0.05                       # the drawing is left as it is (on its side)
-        assert page.input_value("#side textarea") == "AAAA"
-        page.evaluate("Compose._api.rotateSel(-90)")
-        page.evaluate("""() => { const A = Compose._api, t = A.getL().art.lastChild, b = t.bounds;
-          A.retext(t, {size: 72}); A.setBounds(b.x, b.y, b.width * 2, b.height * 2); }""")   # likewise a new size, and the text is made twice as large by hand
-        page.wait_for_function("Compose._api.getL().art.lastChild.data.text.size === 72", timeout=10000)   # refused: 36 pt, made twice as large
-        _wait_for_width(page, 2 * (own + 0.3 * em))
-        sans = page.evaluate("Compose._S.fonts.find(f => f.family === 'Test Sans').id")
-        page.select_option("#side select", sans)                         # until another font is picked for it
-        _wait_for_width(page, 2 * 2.5 * em)                              # three steps of 0.7 em and a letter, twice as large
-        assert page.evaluate("Compose._S.font.family") == "Test Sans"
-        gone = page.evaluate("""(() => { const s = document.querySelector('#side select'); s.value = s.options[0].value;
-          s.dispatchEvent(new Event('change')); return [s.options[0].disabled, Compose._S.font && Compose._S.font.family]; })()""")
-        assert gone == [True, "Test Sans"]                               # the font that is gone can't be made the one for new text
+    (fonts.user_folder() / "TestWide.ttf").unlink()                  # its font is taken away
+    page.click("#side .bsm:text('Refresh fonts')")
+    page.wait_for_function("Compose._S.fontsOther.length === 0")
+    assert page.evaluate(shown) == "Test Wide Regular — not installed"   # it says so, rather than naming another font
+    assert page.evaluate("document.querySelector('#side select').options[0].disabled")   # (and that can't be picked)
+    page.evaluate("""() => { const A = Compose._api, t = A.getL().art.lastChild;
+      A.retext(t, {text: 'AA', spacing: 0}); A.rotateSel(90); }""")   # an edit, and before it is refused the text is turned
+    page.wait_for_function("document.querySelector('#toast') && /not installed/.test(document.querySelector('#toast').textContent)", timeout=10000)
+    assert page.evaluate("(({text, spacing, rot}) => [text, spacing, rot])(Compose._api.getL().art.lastChild.data.text)") == ["AAAA", 100, 90]   # as it was, and still turned
+    tall = page.evaluate("Compose._api.getL().art.lastChild.bounds.height")
+    assert abs(tall - (own + 0.3 * em)) < 0.05                       # the drawing is left as it is (on its side)
+    assert page.input_value("#side textarea") == "AAAA"
+    page.evaluate("Compose._api.rotateSel(-90)")
+    page.evaluate("""() => { const A = Compose._api, t = A.getL().art.lastChild, b = t.bounds;
+      A.retext(t, {size: 72}); A.setBounds(b.x, b.y, b.width * 2, b.height * 2); }""")   # likewise a new size, and the text is made twice as large by hand
+    page.wait_for_function("Compose._api.getL().art.lastChild.data.text.size === 72", timeout=10000)   # refused: 36 pt, made twice as large
+    _wait_for_width(page, 2 * (own + 0.3 * em))
+    sans = page.evaluate("Compose._S.fonts.find(f => f.family === 'Test Sans').id")
+    page.select_option("#side select", sans)                         # until another font is picked for it
+    _wait_for_width(page, 2 * 2.5 * em)                              # three steps of 0.7 em and a letter, twice as large
+    assert page.evaluate("Compose._S.font.family") == "Test Sans"
+    gone = page.evaluate("""(() => { const s = document.querySelector('#side select'); s.value = s.options[0].value;
+      s.dispatchEvent(new Event('change')); return [s.options[0].disabled, Compose._S.font && Compose._S.font.family]; })()""")
+    assert gone == [True, "Test Sans"]                               # the font that is gone can't be made the one for new text
 
-        # The font picked for new text is taken away too: new text falls back to a font that is there.
-        (fonts.user_folder() / "TestSans.ttf").unlink()
-        page.click("#side .bsm:text('Refresh fonts')")
-        page.wait_for_function("Compose._S.fonts.length === 2")
-        page.evaluate("() => { Compose._S.text.text = 'AAAA'; return Compose._api.addText(new paper.Point(20, 80)); }")
-        page.wait_for_function("Compose._api.getL().art.children.length === 2")
-        assert page.evaluate("Compose._api.getL().art.lastChild.data.text.fname") == "A First Font Regular"
-        assert abs(_text_width(page) - 1.3 * em) < 0.05                  # three steps of 0.3 em and a letter
-        (fonts.user_folder() / "First.ttf").unlink()                     # and with no font left, it says what to do
-        (fonts.user_folder() / "A-Wide.ttf").unlink()
-        page.click('[data-ct="text"]')
-        page.click("#side .bsm:text('Refresh fonts')")
-        page.wait_for_function("Compose._S.fonts.length === 0")
-        page.evaluate("Compose._api.addText(new paper.Point(20, 120))")
-        page.wait_for_function("document.querySelector('#toast') && /No fonts found/.test(document.querySelector('#toast').textContent)", timeout=10000)
-        assert page.evaluate("Compose._api.getL().art.children.length") == 2
-        assert not errs, errs
-        b.close()
+    # The font picked for new text is taken away too: new text falls back to a font that is there.
+    (fonts.user_folder() / "TestSans.ttf").unlink()
+    page.click("#side .bsm:text('Refresh fonts')")
+    page.wait_for_function("Compose._S.fonts.length === 2")
+    page.evaluate("() => { Compose._S.text.text = 'AAAA'; return Compose._api.addText(new paper.Point(20, 80)); }")
+    page.wait_for_function("Compose._api.getL().art.children.length === 2")
+    assert page.evaluate("Compose._api.getL().art.lastChild.data.text.fname") == "A First Font Regular"
+    assert abs(_text_width(page) - 1.3 * em) < 0.05                  # three steps of 0.3 em and a letter
+    (fonts.user_folder() / "First.ttf").unlink()                     # and with no font left, it says what to do
+    (fonts.user_folder() / "A-Wide.ttf").unlink()
+    page.click('[data-ct="text"]')
+    page.click("#side .bsm:text('Refresh fonts')")
+    page.wait_for_function("Compose._S.fonts.length === 0")
+    page.evaluate("Compose._api.addText(new paper.Point(20, 120))")
+    page.wait_for_function("document.querySelector('#toast') && /No fonts found/.test(document.querySelector('#toast').textContent)", timeout=10000)
+    assert page.evaluate("Compose._api.getL().art.children.length") == 2
 
 
-def test_text_is_made_of_what_was_asked_for(server):
+def test_text_is_made_of_what_was_asked_for(server, page):
     """While new text is being made, another font is picked (or the list is refreshed). The text keeps
     the font it was asked in. And an edit still on its way when Undo is pressed doesn't spoil Redo."""
     _make_font(fonts.user_folder() / "TestSans.ttf")
     _make_font(fonts.user_folder() / "TestWide.ttf", family="Test Wide", advance=1200)
     fonts.listing(refresh=True)
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        em = page.evaluate("""async () => {
-          const S = Compose._S, j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
-          S.font = S.fonts.find(f => f.family === 'Test Wide'); S.text.text = 'AAAA';
-          return S.text.size * 25.4 / 72;
-        }""")
-        held, sent = [], []
-        page.on("request", lambda r: sent.append(r.post_data_json) if r.url.endswith("/api/text") else None)
-        page.route("**/api/text", lambda route: held.append(route))      # the answer is slow
-        page.evaluate("() => { window.__adding = Compose._api.addText(new paper.Point(20, 20)); }")   # (not waited for)
-        for _ in range(100):
-            if held:
-                break
-            page.wait_for_timeout(50)
-        assert len(held) == 1
-        page.evaluate("() => { Compose._S.font = Compose._S.fonts.find(f => f.family === 'Test Sans'); Compose._S.text.text = 'A'; }")
-        held[0].continue_()
-        page.unroute("**/api/text")
-        page.evaluate("window.__adding")
-        made = page.evaluate("(({text, fname}) => [text, fname])(Compose._api.getL().art.lastChild.data.text)")
-        assert made == ["AAAA", "Test Wide Regular"]                     # used to say A, in Test Sans
-        assert abs(_text_width(page) - 4.0 * em) < 0.05
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    em = page.evaluate("""async () => {
+      const S = Compose._S, j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
+      S.font = S.fonts.find(f => f.family === 'Test Wide'); S.text.text = 'AAAA';
+      return S.text.size * 25.4 / 72;
+    }""")
+    held, sent = [], []
+    page.on("request", lambda r: sent.append(r.post_data_json) if r.url.endswith("/api/text") else None)
+    page.route("**/api/text", lambda route: held.append(route))      # the answer is slow
+    page.evaluate("() => { window.__adding = Compose._api.addText(new paper.Point(20, 20)); }")   # (not waited for)
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert len(held) == 1
+    page.evaluate("() => { Compose._S.font = Compose._S.fonts.find(f => f.family === 'Test Sans'); Compose._S.text.text = 'A'; }")
+    held[0].continue_()
+    page.unroute("**/api/text")
+    page.evaluate("window.__adding")
+    made = page.evaluate("(({text, fname}) => [text, fname])(Compose._api.getL().art.lastChild.data.text)")
+    assert made == ["AAAA", "Test Wide Regular"]                     # used to say A, in Test Sans
+    assert abs(_text_width(page) - 4.0 * em) < 0.05
 
-        face = page.evaluate("Compose._api.getL().art.lastChild.data.text.face")
-        assert len(face) == 40 and "face" not in sent[-1]                # new text: whichever font has that id
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 100})")
-        _wait_for_width(page, 4.3 * em)
-        assert sent[-1]["face"] == face                                  # drawn again: only from that very font
-        page.evaluate("() => { Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 500}); Compose._api.undo(); }")   # Undo while an edit is on its way
-        page.wait_for_timeout(1200)
-        assert abs(_text_width(page) - 4.0 * em) < 0.05
-        assert page.evaluate("Compose._S.hi < Compose._S.hist.length - 1")   # Redo is still there
-        page.evaluate("Compose._api.redo()")
-        assert abs(_text_width(page) - 4.3 * em) < 0.05
-        assert not errs, errs
-        b.close()
+    face = page.evaluate("Compose._api.getL().art.lastChild.data.text.face")
+    assert len(face) == 40 and "face" not in sent[-1]                # new text: whichever font has that id
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 100})")
+    _wait_for_width(page, 4.3 * em)
+    assert sent[-1]["face"] == face                                  # drawn again: only from that very font
+    page.evaluate("() => { Compose._api.retext(Compose._api.getL().art.lastChild, {spacing: 500}); Compose._api.undo(); }")   # Undo while an edit is on its way
+    page.wait_for_timeout(1200)
+    assert abs(_text_width(page) - 4.0 * em) < 0.05
+    assert page.evaluate("Compose._S.hi < Compose._S.hist.length - 1")   # Redo is still there
+    page.evaluate("Compose._api.redo()")
+    assert abs(_text_width(page) - 4.3 * em) < 0.05
 
 
 def test_custom_page_size():
@@ -474,161 +422,117 @@ def test_batch_results_also_land_in_the_library(server, lineart):
 
 
 @pytest.mark.parametrize("target", ["compose", "print", "simulate", "help"])
-def test_leaving_the_batch_view_for_another_tab(server, lineart, target):
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.set_input_files("#file", str(lineart))
-        page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)
-        page.click("#toolbar [data-m=batch]")
-        page.click(f'a[data-t="{target}"]')
-        page.wait_for_timeout(1000)
-        assert not errs, errs
-        assert page.evaluate("document.querySelector('#side').innerText.trim()")          # the new tab drew its panel
-        page.click('a[data-t="convert"]')                                                    # and Convert still works afterwards
-        page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)
-        assert not errs, errs
-        b.close()
+def test_leaving_the_batch_view_for_another_tab(server, lineart, target, page):
+    page.goto(server + "/")
+    page.set_input_files("#file", str(lineart))
+    page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)
+    page.click("#toolbar [data-m=batch]")
+    page.click(f'a[data-t="{target}"]')
+    page.wait_for_timeout(1000)
+    assert page.evaluate("document.querySelector('#side').innerText.trim()")          # the new tab drew its panel
+    page.click('a[data-t="convert"]')                                                    # and Convert still works afterwards
+    page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)
 
 
-def test_compose_in_the_browser(server):
-    sync_api = pytest.importorskip("playwright.sync_api")
+def test_compose_in_the_browser(server, page):
     library.save("badge", '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">'
                           '<circle cx="50" cy="50" r="45" fill="#c8102e"/><rect x="30" y="30" width="40" height="40" fill="#1d3f8f"/></svg>')
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        page.hover("#clib .ltab")
-        page.click("#clibStrip .lt")
-        page.wait_for_function("Compose._api.getL().art.children.length === 1")
-        # recolour the circle, then cut the badge in two with a line
-        page.evaluate("Compose._api.select([Compose._api.getL().art.children[0]])")
-        page.evaluate("Compose._api.applyColour('fill', '#00a651')")
-        assert page.evaluate("Compose._api.leaves(Compose._S.sel).map(l => l.fillColor.toCSS(true))[0]") == "#00a651"
-        page.evaluate("Compose._api.sendToPrint()")
-        page.wait_for_function("document.querySelector('#nav a.on').dataset.t === 'print'", timeout=60000)
-        assert page.evaluate("[PG.size, PG.custom_w, PG.custom_h]") == ["Custom", 353, 266]
-        assert not errs
-        b.close()
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    page.hover("#clib .ltab")
+    page.click("#clibStrip .lt")
+    page.wait_for_function("Compose._api.getL().art.children.length === 1")
+    # recolour the circle, then cut the badge in two with a line
+    page.evaluate("Compose._api.select([Compose._api.getL().art.children[0]])")
+    page.evaluate("Compose._api.applyColour('fill', '#00a651')")
+    assert page.evaluate("Compose._api.leaves(Compose._S.sel).map(l => l.fillColor.toCSS(true))[0]") == "#00a651"
+    page.evaluate("Compose._api.sendToPrint()")
+    page.wait_for_function("document.querySelector('#nav a.on').dataset.t === 'print'", timeout=60000)
+    assert page.evaluate("[PG.size, PG.custom_w, PG.custom_h]") == ["Custom", 353, 266]
 
 
-def test_compose_send_rename_and_eyedropper(server):
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        assert page.query_selector('[data-ct="cut"]') is None
-        page.evaluate("""(() => { const L = Compose._api.getL();
-          L.art.addChild(new paper.Path.Rectangle({point: [40, 40], size: [100, 100], fillColor: '#c8102e'}));
-          L.art.addChild(new paper.Path.Circle({center: [220, 100], radius: 40, fillColor: '#000000'})); Compose._api.commit(); })()""")
-        page.evaluate("Compose._api.sendToPrint()")
-        page.wait_for_function("document.querySelector('#nav a.on').dataset.t === 'print'", timeout=60000)
-        page.wait_for_function("lastPalette.length > 0", timeout=120000)
-        page.click("#nmEdit")
-        page.keyboard.type("my badge")
-        page.keyboard.press("Enter")
-        assert page.evaluate("fileName") == "my badge"
-        page.evaluate("eyeStart(0)")
-        assert page.evaluate("EYE.on && P.print.picked")
-        page.keyboard.press("Escape")
-        assert page.evaluate("!EYE.on")
-        assert not errs, errs
-        b.close()
+def test_compose_send_rename_and_eyedropper(server, page):
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    assert page.query_selector('[data-ct="cut"]') is None
+    page.evaluate("""(() => { const L = Compose._api.getL();
+      L.art.addChild(new paper.Path.Rectangle({point: [40, 40], size: [100, 100], fillColor: '#c8102e'}));
+      L.art.addChild(new paper.Path.Circle({center: [220, 100], radius: 40, fillColor: '#000000'})); Compose._api.commit(); })()""")
+    page.evaluate("Compose._api.sendToPrint()")
+    page.wait_for_function("document.querySelector('#nav a.on').dataset.t === 'print'", timeout=60000)
+    page.wait_for_function("lastPalette.length > 0", timeout=120000)
+    page.click("#nmEdit")
+    page.keyboard.type("my badge")
+    page.keyboard.press("Enter")
+    assert page.evaluate("fileName") == "my badge"
+    page.evaluate("eyeStart(0)")
+    assert page.evaluate("EYE.on && P.print.picked")
+    page.keyboard.press("Escape")
+    assert page.evaluate("!EYE.on")
 
 
-def test_renaming_in_the_header_renames_the_library_item(server, lineart):
+def test_renaming_in_the_header_renames_the_library_item(server, lineart, page):
     """The header name names the library item. Renaming renames the file and leaves the graphic alone,
     even on Print (where it used to save the whole print page over the graphic)."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.set_input_files("#file", str(lineart))
-        page.wait_for_function("libName !== ''", timeout=60000)
-        traced = library.read(page.evaluate("libName"))
+    page.goto(server + "/")
+    page.set_input_files("#file", str(lineart))
+    page.wait_for_function("libName !== ''", timeout=60000)
+    traced = library.read(page.evaluate("libName"))
 
-        def rename(to):
-            page.click("#nmEdit")                                         # clicking selects the whole name
-            if to is None:
-                page.keyboard.press("Escape")                              # looked at the name, changed nothing
-            else:
-                page.keyboard.type(to)
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(2500)                                    # longer than the delayed save
+    def rename(to):
+        page.click("#nmEdit")                                         # clicking selects the whole name
+        if to is None:
+            page.keyboard.press("Escape")                              # looked at the name, changed nothing
+        else:
+            page.keyboard.type(to)
+            page.keyboard.press("Enter")
+        page.wait_for_timeout(2500)                                    # longer than the delayed save
 
-        rename("my badge")
-        assert [i["name"] for i in library.listing()] == ["my badge.svg"]  # used to stay line.svg
-        page.click('a[data-t="print"]')
-        page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
-        rename(None)
-        rename("final badge")
-        assert [i["name"] for i in library.listing()] == ["final badge.svg"]
-        assert library.read("final badge.svg") == traced                   # still the Convert graphic, not the print page
-        assert not errs, errs
-        b.close()
+    rename("my badge")
+    assert [i["name"] for i in library.listing()] == ["my badge.svg"]  # used to stay line.svg
+    page.click('a[data-t="print"]')
+    page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
+    rename(None)
+    rename("final badge")
+    assert [i["name"] for i in library.listing()] == ["final badge.svg"]
+    assert library.read("final badge.svg") == traced                   # still the Convert graphic, not the print page
 
 
-def test_type_on_the_page_layer_thumbnails_and_shortcuts(server):
-    sync_api = pytest.importorskip("playwright.sync_api")
+def test_type_on_the_page_layer_thumbnails_and_shortcuts(server, page):
     _make_font(fonts.user_folder() / "TestSans.ttf")
     fonts.listing(refresh=True)
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        assert page.inner_text('[data-ct="pen"] i') == "P"
-        page.click('[data-ct="text"]')
-        page.wait_for_function("Compose._S.fonts && Compose._S.fonts.length")
-        box = page.eval_on_selector("#ccanvas", "e => { const r = e.getBoundingClientRect(); return [r.x + 200, r.y + 150]; }")
-        page.mouse.click(*box)
-        page.wait_for_selector("#cwrap textarea")
-        page.wait_for_function("document.activeElement && document.activeElement.tagName === 'TEXTAREA'")
-        page.keyboard.type("AA")
-        page.keyboard.press("Escape")
-        page.wait_for_function("Compose._api.getL().art.children.length === 1", timeout=20000)
-        assert page.evaluate("Compose._api.getL().art.children[0].data.text.text") == "AA"
-        # layers show a thumbnail and the selected row is highlighted
-        page.wait_for_selector("#clayers .lyr.on .th svg")
-        # double-click the text with the select tool to edit it in place
-        page.click('[data-ct="select"]')
-        c = page.evaluate("(() => { const it = Compose._api.getL().art.children[0]; const p = paper.view.projectToView(it.bounds.leftCenter.add([it.bounds.width * 0.1, 0])); const r = document.querySelector('#ccanvas').getBoundingClientRect(); return [r.x + p.x, r.y + p.y]; })()")
-        page.mouse.dblclick(*c)
-        page.wait_for_selector("#cwrap textarea")
-        page.wait_for_function("document.activeElement && document.activeElement.tagName === 'TEXTAREA'")
-        page.keyboard.type("A")
-        page.keyboard.press("Escape")
-        page.wait_for_function("Compose._api.getL().art.children[0].data.text.text.length === 3 || Compose._api.getL().art.children[0].data.text.text.includes('AAA')", timeout=20000)
-        assert not errs, errs
-        b.close()
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    assert page.inner_text('[data-ct="pen"] i') == "P"
+    page.click('[data-ct="text"]')
+    page.wait_for_function("Compose._S.fonts && Compose._S.fonts.length")
+    box = page.eval_on_selector("#ccanvas", "e => { const r = e.getBoundingClientRect(); return [r.x + 200, r.y + 150]; }")
+    page.mouse.click(*box)
+    page.wait_for_selector("#cwrap textarea")
+    page.wait_for_function("document.activeElement && document.activeElement.tagName === 'TEXTAREA'")
+    page.keyboard.type("AA")
+    page.keyboard.press("Escape")
+    page.wait_for_function("Compose._api.getL().art.children.length === 1", timeout=20000)
+    assert page.evaluate("Compose._api.getL().art.children[0].data.text.text") == "AA"
+    # layers show a thumbnail and the selected row is highlighted
+    page.wait_for_selector("#clayers .lyr.on .th svg")
+    # double-click the text with the select tool to edit it in place
+    page.click('[data-ct="select"]')
+    c = page.evaluate("(() => { const it = Compose._api.getL().art.children[0]; const p = paper.view.projectToView(it.bounds.leftCenter.add([it.bounds.width * 0.1, 0])); const r = document.querySelector('#ccanvas').getBoundingClientRect(); return [r.x + p.x, r.y + p.y]; })()")
+    page.mouse.dblclick(*c)
+    page.wait_for_selector("#cwrap textarea")
+    page.wait_for_function("document.activeElement && document.activeElement.tagName === 'TEXTAREA'")
+    page.keyboard.type("A")
+    page.keyboard.press("Escape")
+    page.wait_for_function("Compose._api.getL().art.children[0].data.text.text.length === 3 || Compose._api.getL().art.children[0].data.text.text.includes('AAA')", timeout=20000)
 
 
-def _page_before_its_settings(sync_api, p, server):
-    """The page opened, with its settings (/api/defaults) still on their way: (browser, page, errors, let them through)."""
-    b = p.chromium.launch()
-    page = b.new_page(viewport={"width": 1400, "height": 900})
-    errs, held = [], []
-    page.on("pageerror", lambda e: errs.append(str(e)))
+def _page_before_its_settings(page, server):
+    """Open the page with its settings (/api/defaults) still on their way; gives back what lets them through."""
+    held = []
     page.route("**/api/defaults", lambda route: held.append(route))
     page.goto(server + "/")
     for _ in range(100):
@@ -636,281 +540,227 @@ def _page_before_its_settings(sync_api, p, server):
             break
         page.wait_for_timeout(20)
     assert held and page.evaluate("document.querySelector('#ver').textContent") in ("", "v")   # asked for, not here yet
-    return b, page, errs, lambda: held[0].continue_()
+    return lambda: held[0].continue_()
 
 
 @pytest.mark.parametrize("tab", ["compose", "simulate", "print", "help"])
-def test_a_tab_clicked_before_the_settings_arrive_is_the_tab_you_get(server, tab):
+def test_a_tab_clicked_before_the_settings_arrive_is_the_tab_you_get(server, tab, page):
     """The page asks Boot Tool for its settings when it opens, and showed Convert when they arrived:
     a tab clicked in that first moment was undone. (On a slow machine that is a long moment; the
     browser tests click Compose at once, and one of them failed that way now and then.) The click is
     remembered now, and the tab opened when the settings are here."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b, page, errs, let_through = _page_before_its_settings(sync_api, p, server)
-        page.click(f'a[data-t="{tab}"]')
-        assert page.evaluate("[...document.querySelectorAll('#nav a.on')].map(a => a.dataset.t)") == [tab]   # the click shows at once
-        let_through()
-        page.wait_for_function("document.querySelector('#ver').textContent.length > 1")
-        page.wait_for_timeout(200)
-        assert page.evaluate("[...document.querySelectorAll('#nav a.on')].map(a => a.dataset.t)") == [tab]
-        assert page.evaluate("tool") == tab
-        if tab == "compose":
-            page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-            assert page.evaluate("getComputedStyle(document.querySelector('#vp')).display") == "none"
-        if tab == "help":
-            assert page.evaluate("getComputedStyle(document.querySelector('#help')).display") == "block"
-        page.click('a[data-t="convert"]')                                   # and the tabs work as ever afterwards
-        assert page.evaluate("tool") == "convert"
-        assert not errs, errs
-        b.close()
+    let_through = _page_before_its_settings(page, server)
+    page.click(f'a[data-t="{tab}"]')
+    assert page.evaluate("[...document.querySelectorAll('#nav a.on')].map(a => a.dataset.t)") == [tab]   # the click shows at once
+    let_through()
+    page.wait_for_function("document.querySelector('#ver').textContent.length > 1")
+    page.wait_for_timeout(200)
+    assert page.evaluate("[...document.querySelectorAll('#nav a.on')].map(a => a.dataset.t)") == [tab]
+    assert page.evaluate("tool") == tab
+    if tab == "compose":
+        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+        assert page.evaluate("getComputedStyle(document.querySelector('#vp')).display") == "none"
+    if tab == "help":
+        assert page.evaluate("getComputedStyle(document.querySelector('#help')).display") == "block"
+    page.click('a[data-t="convert"]')                                   # and the tabs work as ever afterwards
+    assert page.evaluate("tool") == "convert"
 
 
-def test_a_picture_opened_before_the_settings_arrive_is_opened_when_they_do(server, lineart):
+def test_a_picture_opened_before_the_settings_arrive_is_opened_when_they_do(server, lineart, page):
     """A picture chosen in that first moment waits for the settings too, and is then traced with them."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b, page, errs, let_through = _page_before_its_settings(sync_api, p, server)
-        sent = []
-        page.on("request", lambda r: sent.append(r.url))
-        page.set_input_files("#file", str(lineart))
-        page.click("#toolbar [data-m=batch]")                               # (and the Batch button, pressed too early, does nothing)
-        page.wait_for_timeout(300)
-        assert not [u for u in sent if "/api/upload" in u]                  # not sent to be traced without the settings
-        assert page.evaluate("imageId") is None and page.evaluate("mode") == "svg" and not errs, errs
-        let_through()
-        page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)   # traced
-        assert page.evaluate("tool") == "convert" and page.evaluate("imageId") and page.evaluate("P.convert.mode") and not errs, errs
-        b.close()
+    let_through = _page_before_its_settings(page, server)
+    sent = []
+    page.on("request", lambda r: sent.append(r.url))
+    page.set_input_files("#file", str(lineart))
+    page.click("#toolbar [data-m=batch]")                               # (and the Batch button, pressed too early, does nothing)
+    page.wait_for_timeout(300)
+    assert not [u for u in sent if "/api/upload" in u]                  # not sent to be traced without the settings
+    assert page.evaluate("imageId") is None and page.evaluate("mode") == "svg"
+    let_through()
+    page.wait_for_function("/Paths/i.test(document.querySelector('#stats').textContent)", timeout=60000)   # traced
+    assert page.evaluate("tool") == "convert" and page.evaluate("imageId") and page.evaluate("P.convert.mode")
 
 
-def test_if_the_settings_never_arrive_the_page_says_so(server, lineart):
+def test_if_the_settings_never_arrive_the_page_says_so(server, lineart, page):
     """Boot Tool stopped, or its answer lost: the page cannot draw anything. It says so in plain
     words, at once and again when a tab is clicked or a picture opened, and marks no tab that it
     cannot show."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.route("**/api/defaults", lambda route: route.abort())
-        page.goto(server + "/")
+    page.route("**/api/defaults", lambda route: route.abort())
+    page.goto(server + "/")
+    page.wait_for_function("document.querySelector('#toast').style.display === 'block'")
+    assert "Boot Tool did not answer" in page.evaluate("document.querySelector('#toast').textContent")
+    for try_it in (lambda: page.click('a[data-t="compose"]'), lambda: page.set_input_files("#file", str(lineart))):
+        page.evaluate("document.querySelector('#toast').style.display = 'none'")
+        try_it()
         page.wait_for_function("document.querySelector('#toast').style.display === 'block'")
         assert "Boot Tool did not answer" in page.evaluate("document.querySelector('#toast').textContent")
-        for try_it in (lambda: page.click('a[data-t="compose"]'), lambda: page.set_input_files("#file", str(lineart))):
-            page.evaluate("document.querySelector('#toast').style.display = 'none'")
-            try_it()
-            page.wait_for_function("document.querySelector('#toast').style.display === 'block'")
-            assert "Boot Tool did not answer" in page.evaluate("document.querySelector('#toast').textContent")
-            assert page.evaluate("[...document.querySelectorAll('#nav a.on')].map(a => a.dataset.t)") == ["convert"]
-        assert page.evaluate("imageId") is None and not errs, errs           # (no error left for the browser to report, either)
-        b.close()
+        assert page.evaluate("[...document.querySelectorAll('#nav a.on')].map(a => a.dataset.t)") == ["convert"]
+    assert page.evaluate("imageId") is None                              # (and no error is left for the browser to report: the page fixture checks)
 
 
-def test_add_images_in_the_batch_view_adds_them(server, lineart, tmp_path):
+def test_add_images_in_the_batch_view_adds_them(server, lineart, tmp_path, page):
     """"Add images" empties its file box as soon as the pictures are chosen. Waiting for the settings
     before taking the pictures down lost them all: nothing was added, without a word."""
-    sync_api = pytest.importorskip("playwright.sync_api")
     second = tmp_path / "second.png"
     second.write_bytes(lineart.read_bytes())
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.wait_for_function("document.querySelector('#ver').textContent.length > 1")   # the settings are here
-        page.click("#toolbar [data-m=batch]")
-        page.set_input_files("#side input[type=file][multiple]:not([webkitdirectory])", [str(lineart), str(second)])
-        page.wait_for_function("BATCH.items.length === 2 && !BATCH.adding", timeout=60000)
-        assert page.evaluate("BATCH.items.map(i => i.name)") == ["line.png", "second.png"]
-        assert not errs, errs
-        b.close()
+    page.goto(server + "/")
+    page.wait_for_function("document.querySelector('#ver').textContent.length > 1")   # the settings are here
+    page.click("#toolbar [data-m=batch]")
+    page.set_input_files("#side input[type=file][multiple]:not([webkitdirectory])", [str(lineart), str(second)])
+    page.wait_for_function("BATCH.items.length === 2 && !BATCH.adding", timeout=60000)
+    assert page.evaluate("BATCH.items.map(i => i.name)") == ["line.png", "second.png"]
 
 
-def test_names_with_html_are_shown_as_text(server):
+def test_names_with_html_are_shown_as_text(server, page):
     """A graphic's name comes from its file name; it must be shown as written, never run as part of the page."""
-    sync_api = pytest.importorskip("playwright.sync_api")
     name = "<img src=x onerror=window.__ran=1>"     # not a valid Windows file name, so it is handed to the browser directly
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        page.set_input_files("#cfile", {"name": name + ".svg", "mimeType": "image/svg+xml", "buffer": SVG.encode()})
-        page.wait_for_function("Compose._S.sel.length === 1")
-        page.wait_for_timeout(300)
-        assert not page.evaluate("window.__ran === 1")
-        assert name in page.evaluate("[...document.querySelectorAll('#side .bh')].map(e => e.textContent)")
-        assert not errs, errs
-        b.close()
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    page.set_input_files("#cfile", {"name": name + ".svg", "mimeType": "image/svg+xml", "buffer": SVG.encode()})
+    page.wait_for_function("Compose._S.sel.length === 1")
+    page.wait_for_timeout(300)
+    assert not page.evaluate("window.__ran === 1")
+    assert name in page.evaluate("[...document.querySelectorAll('#side .bh')].map(e => e.textContent)")
 
 
-def test_groups_and_fill_tool_in_the_browser(server):
-    sync_api = pytest.importorskip("playwright.sync_api")
+def test_groups_and_fill_tool_in_the_browser(server, page):
     ring = '<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60"><path fill-rule="evenodd" d="M5 5H55V55H5ZM15 15V45H45V15Z"/></svg>'
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        pg_ = b.new_page(viewport={"width": 1400, "height": 900})
-        errors = []
-        pg_.on("pageerror", lambda e: errors.append(str(e)))
-        pg_.goto(server); pg_.click('#nav a[data-t="compose"]'); pg_.wait_for_timeout(500)
-        pg_.evaluate("s => { Compose._api.addSvg(s, 'One'); Compose._api.addSvg(s, 'Two'); }", ring)
-        # group two graphics: one new row with a caret, children listed, then ungroup
-        pg_.evaluate("() => { const L = Compose._api.getL(); Compose._api.select(L.art.children.slice()); Compose._api.group(); }")
-        assert pg_.evaluate("Compose._api.getL().art.children.length") == 1
-        assert pg_.locator("#clayers .lyr").count() == 3          # the group and its two children
-        pg_.keyboard.press("Control+Shift+G")
-        assert pg_.evaluate("Compose._api.getL().art.children.length") == 2
-        pg_.evaluate("() => { const L = Compose._api.getL(); Compose._api.select(L.art.children.slice()); }")
-        pg_.keyboard.press("Control+G")
-        assert pg_.evaluate("Compose._api.getL().art.children.length") == 1
-        pg_.keyboard.press("Control+Shift+G")
-        pg_.evaluate("() => { const L = Compose._api.getL(); L.art.children[1].remove(); Compose._api.commit(); Compose._api.select([]); }")
-        # Fill: click the hollow middle of the ring
-        pg_.keyboard.press("f")
-        assert pg_.locator("[data-ct=fill].on").count() == 1
-        c = pg_.evaluate("() => { const it = Compose._api.getL().art.children[0], b = it.bounds; return [b.center.x, b.center.y]; }")
-        pg_.evaluate("([x, y]) => Compose._api.fillAt(new paper.Point(x, y), false)", c)
-        pg_.wait_for_function("Compose._api.getL().art.children.length === 2")
-        info = pg_.evaluate("() => { const L = Compose._api.getL(), f = L.art.children[0], r = L.art.children[1]; return [f.data.kind, f.fillColor.toCSS(true), f.index, r.index, f.bounds.width, r.bounds.width]; }")
-        assert info[0] == "fill" and info[1] == "#ffffff" and info[2] == 0 and info[3] == 1      # behind the ring
-        assert info[5] * 0.6 < info[4] < info[5] * 0.6 + 1.0                                           # the hole is half the ring wide, grown a little
-        # clicking the fill again recolours it; clicking outside the ring says it is open
-        pg_.evaluate("([x, y]) => Compose._api.fillAt(new paper.Point(x, y), false)", c)
-        assert pg_.evaluate("Compose._api.getL().art.children.length") == 2
-        pg_.evaluate("() => Compose._api.fillAt(new paper.Point(4, 4), false)")
-        pg_.wait_for_function("document.querySelector('#toast') && /open to the outside/.test(document.querySelector('#toast').textContent)")
-        assert not errors, errors
-        b.close()
+    page.goto(server); page.click('#nav a[data-t="compose"]'); page.wait_for_timeout(500)
+    page.evaluate("s => { Compose._api.addSvg(s, 'One'); Compose._api.addSvg(s, 'Two'); }", ring)
+    # group two graphics: one new row with a caret, children listed, then ungroup
+    page.evaluate("() => { const L = Compose._api.getL(); Compose._api.select(L.art.children.slice()); Compose._api.group(); }")
+    assert page.evaluate("Compose._api.getL().art.children.length") == 1
+    assert page.locator("#clayers .lyr").count() == 3          # the group and its two children
+    page.keyboard.press("Control+Shift+G")
+    assert page.evaluate("Compose._api.getL().art.children.length") == 2
+    page.evaluate("() => { const L = Compose._api.getL(); Compose._api.select(L.art.children.slice()); }")
+    page.keyboard.press("Control+G")
+    assert page.evaluate("Compose._api.getL().art.children.length") == 1
+    page.keyboard.press("Control+Shift+G")
+    page.evaluate("() => { const L = Compose._api.getL(); L.art.children[1].remove(); Compose._api.commit(); Compose._api.select([]); }")
+    # Fill: click the hollow middle of the ring
+    page.keyboard.press("f")
+    assert page.locator("[data-ct=fill].on").count() == 1
+    c = page.evaluate("() => { const it = Compose._api.getL().art.children[0], b = it.bounds; return [b.center.x, b.center.y]; }")
+    page.evaluate("([x, y]) => Compose._api.fillAt(new paper.Point(x, y), false)", c)
+    page.wait_for_function("Compose._api.getL().art.children.length === 2")
+    info = page.evaluate("() => { const L = Compose._api.getL(), f = L.art.children[0], r = L.art.children[1]; return [f.data.kind, f.fillColor.toCSS(true), f.index, r.index, f.bounds.width, r.bounds.width]; }")
+    assert info[0] == "fill" and info[1] == "#ffffff" and info[2] == 0 and info[3] == 1      # behind the ring
+    assert info[5] * 0.6 < info[4] < info[5] * 0.6 + 1.0                                           # the hole is half the ring wide, grown a little
+    # clicking the fill again recolours it; clicking outside the ring says it is open
+    page.evaluate("([x, y]) => Compose._api.fillAt(new paper.Point(x, y), false)", c)
+    assert page.evaluate("Compose._api.getL().art.children.length") == 2
+    page.evaluate("() => Compose._api.fillAt(new paper.Point(4, 4), false)")
+    page.wait_for_function("document.querySelector('#toast') && /open to the outside/.test(document.querySelector('#toast').textContent)")
 
 
-def test_size_boxes_for_text(server):
+def test_size_boxes_for_text(server, page):
     """Typing a Height for text did nothing unless "Keep proportions" was ticked, and the Width box kept
     its old number after the text was edited."""
-    sync_api = pytest.importorskip("playwright.sync_api")
     _make_font(fonts.user_folder() / "TestSans.ttf")
     fonts.listing(refresh=True)
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        bounds = "(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.width, b.height]; })()"
-        box = "l => [...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === l).value"
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    bounds = "(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.width, b.height]; })()"
+    box = "l => [...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === l).value"
 
-        def type_in(label, value):
-            n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", label)
-            assert n >= 0, label
-            i = page.locator(".cell input").nth(n)
-            i.fill(str(value))
-            i.press("Enter")
+    def type_in(label, value):
+        n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", label)
+        assert n >= 0, label
+        i = page.locator(".cell input").nth(n)
+        i.fill(str(value))
+        i.press("Enter")
 
-        page.evaluate("""async () => {
-          const A = Compose._api, S = Compose._S, L = A.getL();
-          const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
-          S.font = S.fonts.find(f => f.family === 'Test Sans'); S.text.text = 'AA';
-          await A.addText(new paper.Point(20, 20));
-          A.select([L.art.lastChild]);
-        }""")
-        w0, h0 = page.evaluate(bounds)
-        page.uncheck(".chk input")                                         # Keep proportions: off
-        type_in("Height", float(page.evaluate(box, "Height")) * 2)
-        w1, h1 = page.evaluate(bounds)
-        assert abs(h1 - 2 * h0) < 0.05 and abs(w1 - 2 * w0) < 0.05          # used to stay as it was
-        assert abs(page.evaluate("Compose._api.getL().art.lastChild.data.text.size") - 72) < 0.01   # (so the next edit keeps the size)
-        type_in("Width", float(page.evaluate(box, "Width")) / 2)
-        assert all(abs(a - b_) < 0.05 for a, b_ in zip(page.evaluate(bounds), (w0, h0)))
+    page.evaluate("""async () => {
+      const A = Compose._api, S = Compose._S, L = A.getL();
+      const j = await (await fetch('/api/fonts')).json(); S.fonts = j.fonts;
+      S.font = S.fonts.find(f => f.family === 'Test Sans'); S.text.text = 'AA';
+      await A.addText(new paper.Point(20, 20));
+      A.select([L.art.lastChild]);
+    }""")
+    w0, h0 = page.evaluate(bounds)
+    page.uncheck(".chk input")                                         # Keep proportions: off
+    type_in("Height", float(page.evaluate(box, "Height")) * 2)
+    w1, h1 = page.evaluate(bounds)
+    assert abs(h1 - 2 * h0) < 0.05 and abs(w1 - 2 * w0) < 0.05          # used to stay as it was
+    assert abs(page.evaluate("Compose._api.getL().art.lastChild.data.text.size") - 72) < 0.01   # (so the next edit keeps the size)
+    type_in("Width", float(page.evaluate(box, "Width")) / 2)
+    assert all(abs(a - b_) < 0.05 for a, b_ in zip(page.evaluate(bounds), (w0, h0)))
 
-        shown = float(page.evaluate(box, "Width"))
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {text: 'AAAAAA'})")   # the text is edited
-        page.wait_for_function("w => Compose._api.getL().art.lastChild.bounds.width > w * 2", arg=w0, timeout=20000)
-        w2, h2 = page.evaluate(bounds)
-        page.wait_for_function("([l, v]) => Math.abs(parseFloat([...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === l).value) - v) < 0.02 * v",
-                               arg=["Width", shown * w2 / w0], timeout=5000)   # the Width box follows (it used to keep the old number)
-        assert abs(h2 - h0) < 0.05
+    shown = float(page.evaluate(box, "Width"))
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {text: 'AAAAAA'})")   # the text is edited
+    page.wait_for_function("w => Compose._api.getL().art.lastChild.bounds.width > w * 2", arg=w0, timeout=20000)
+    w2, h2 = page.evaluate(bounds)
+    page.wait_for_function("([l, v]) => Math.abs(parseFloat([...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === l).value) - v) < 0.02 * v",
+                           arg=["Width", shown * w2 / w0], timeout=5000)   # the Width box follows (it used to keep the old number)
+    assert abs(h2 - h0) < 0.05
 
-        n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", "Width")
-        width_box = page.locator(".cell input").nth(n)
-        width_box.click()                                                  # the cursor is in the Width box, nothing typed,
-        shown = float(width_box.input_value())
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {text: 'AA'})")   # and the text is edited
-        page.wait_for_function("w => Compose._api.getL().art.lastChild.bounds.width < w * 0.6", arg=w2, timeout=20000)
-        page.wait_for_function("([n, v]) => Math.abs(parseFloat(document.querySelectorAll('.cell input')[n].value) - v) < 0.02 * v",
-                               arg=[n, shown * w0 / w2], timeout=5000)     # the box follows all the same
-        width_box.fill("5")                                                # typed, not entered yet: left alone by a redraw
-        page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {text: 'AAA'})")
-        page.wait_for_function("w => Compose._api.getL().art.lastChild.bounds.width > w * 1.2", arg=w0, timeout=20000)
-        page.wait_for_timeout(300)
-        assert width_box.input_value() == "5"
-        width_box.press("Enter")
-        wide = page.evaluate(bounds)[0]
-        assert abs(float(width_box.input_value()) / 5 - 1) < 0.01 and wide > 0   # entered: the text is that wide, and the box says so
+    n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", "Width")
+    width_box = page.locator(".cell input").nth(n)
+    width_box.click()                                                  # the cursor is in the Width box, nothing typed,
+    shown = float(width_box.input_value())
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {text: 'AA'})")   # and the text is edited
+    page.wait_for_function("w => Compose._api.getL().art.lastChild.bounds.width < w * 0.6", arg=w2, timeout=20000)
+    page.wait_for_function("([n, v]) => Math.abs(parseFloat(document.querySelectorAll('.cell input')[n].value) - v) < 0.02 * v",
+                           arg=[n, shown * w0 / w2], timeout=5000)     # the box follows all the same
+    width_box.fill("5")                                                # typed, not entered yet: left alone by a redraw
+    page.evaluate("Compose._api.retext(Compose._api.getL().art.lastChild, {text: 'AAA'})")
+    page.wait_for_function("w => Compose._api.getL().art.lastChild.bounds.width > w * 1.2", arg=w0, timeout=20000)
+    page.wait_for_timeout(300)
+    assert width_box.input_value() == "5"
+    width_box.press("Enter")
+    wide = page.evaluate(bounds)[0]
+    assert abs(float(width_box.input_value()) / 5 - 1) < 0.01 and wide > 0   # entered: the text is that wide, and the box says so
 
-        type_in("Width", 0.01)                                             # very small text, then only moved:
-        tiny = page.evaluate(bounds)
-        type_in("X", float(page.evaluate(box, "X")) + 10)
-        assert all(abs(a - b_) < 1e-6 for a, b_ in zip(page.evaluate(bounds), tiny))   # moving it doesn't resize it
-        assert not errs, errs
-        b.close()
+    type_in("Width", 0.01)                                             # very small text, then only moved:
+    tiny = page.evaluate(bounds)
+    type_in("X", float(page.evaluate(box, "X")) + 10)
+    assert all(abs(a - b_) < 1e-6 for a, b_ in zip(page.evaluate(bounds), tiny))   # moving it doesn't resize it
 
 
-def test_position_and_size_boxes(server):
+def test_position_and_size_boxes(server, page):
     """Typing X then Y moves to both; a flat line survives the boxes; the boxes follow a drag."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900})
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        page.click('a[data-t="compose"]')
-        page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
-        bounds = "(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.x, b.y, b.width, b.height].map(v => Math.round(v * 10) / 10); })()"
-        def type_in(label, value):
-            n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", label)   # the artboard has its own Width / Height above
-            assert n >= 0, label
-            i = page.locator(".cell input").nth(n)
-            i.fill(str(value))
-            i.press("Enter")
+    page.goto(server + "/")
+    page.click('a[data-t="compose"]')
+    page.wait_for_function("typeof Compose !== 'undefined' && Compose._S.ready")
+    bounds = "(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.x, b.y, b.width, b.height].map(v => Math.round(v * 10) / 10); })()"
+    def type_in(label, value):
+        n = page.evaluate("l => [...document.querySelectorAll('.cell input')].findLastIndex(i => (i.closest('label,div') || {}).textContent.trim() === l)", label)   # the artboard has its own Width / Height above
+        assert n >= 0, label
+        i = page.locator(".cell input").nth(n)
+        i.fill(str(value))
+        i.press("Enter")
 
-        page.evaluate("""(() => { const A = Compose._api, L = A.getL();
-          const r = new paper.Path.Rectangle({point: [10, 10], size: [40, 30], fillColor: '#000'}); L.art.addChild(r); A.commit(); A.select([r]); })()""")
-        units = page.evaluate("[...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === 'X').value")
-        k = float(units) / 10                                              # the boxes may show cm or mm
-        type_in("X", 100 * k)
-        type_in("Y", 80 * k)
-        assert page.evaluate(bounds)[:2] == [100, 80]                       # typing Y used to put X back
-        type_in("Width", 60 * k)
-        assert page.evaluate(bounds) == [100, 80, 60, 45]                   # proportions kept, position kept
+    page.evaluate("""(() => { const A = Compose._api, L = A.getL();
+      const r = new paper.Path.Rectangle({point: [10, 10], size: [40, 30], fillColor: '#000'}); L.art.addChild(r); A.commit(); A.select([r]); })()""")
+    units = page.evaluate("[...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === 'X').value")
+    k = float(units) / 10                                              # the boxes may show cm or mm
+    type_in("X", 100 * k)
+    type_in("Y", 80 * k)
+    assert page.evaluate(bounds)[:2] == [100, 80]                       # typing Y used to put X back
+    type_in("Width", 60 * k)
+    assert page.evaluate(bounds) == [100, 80, 60, 45]                   # proportions kept, position kept
 
-        # dragged with the mouse: X and Y follow it, and a width typed afterwards leaves it where it was dropped
-        shown = "l => +[...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === l).value"
-        at = page.evaluate("""(() => { const r = document.querySelector('#ccanvas').getBoundingClientRect(),
-          v = paper.view.projectToView(Compose._api.getL().art.lastChild.bounds.center); return [r.left + v.x, r.top + v.y]; })()""")
-        page.mouse.move(*at)
-        page.mouse.down()
-        page.mouse.move(at[0] - 90, at[1] + 60, steps=6)                    # still held
-        x, y = page.evaluate("(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.x, b.y]; })()")
-        assert x < 95 and y > 85                                            # it has moved (from 100, 80)
-        assert [page.evaluate(shown, "X"), page.evaluate(shown, "Y")] == pytest.approx([x * k, y * k], abs=0.006)   # the boxes used to stay as they were
-        page.mouse.up()
-        dropped = page.evaluate(bounds)
-        type_in("Width", 30 * k)
-        assert page.evaluate(bounds) == dropped[:2] + [30, 22.5]            # used to jump back to where it was before the drag
+    # dragged with the mouse: X and Y follow it, and a width typed afterwards leaves it where it was dropped
+    shown = "l => +[...document.querySelectorAll('.cell input')].findLast(i => (i.closest('label,div') || {}).textContent.trim() === l).value"
+    at = page.evaluate("""(() => { const r = document.querySelector('#ccanvas').getBoundingClientRect(),
+      v = paper.view.projectToView(Compose._api.getL().art.lastChild.bounds.center); return [r.left + v.x, r.top + v.y]; })()""")
+    page.mouse.move(*at)
+    page.mouse.down()
+    page.mouse.move(at[0] - 90, at[1] + 60, steps=6)                    # still held
+    x, y = page.evaluate("(() => { const b = Compose._api.getL().art.lastChild.bounds; return [b.x, b.y]; })()")
+    assert x < 95 and y > 85                                            # it has moved (from 100, 80)
+    assert [page.evaluate(shown, "X"), page.evaluate(shown, "Y")] == pytest.approx([x * k, y * k], abs=0.006)   # the boxes used to stay as they were
+    page.mouse.up()
+    dropped = page.evaluate(bounds)
+    type_in("Width", 30 * k)
+    assert page.evaluate(bounds) == dropped[:2] + [30, 22.5]            # used to jump back to where it was before the drag
 
-        page.evaluate("""(() => { const A = Compose._api, L = A.getL(); L.art.removeChildren();
-          const l = new paper.Path.Line({from: [20, 50], to: [120, 50], strokeColor: '#000', strokeWidth: 1}); L.art.addChild(l); A.commit(); A.select([l]); })()""")
-        type_in("X", 30 * k)
-        x, y, w, h = page.evaluate(bounds)
-        assert (x, y, w, h) == (30, 50, 100, 0)                             # a flat line used to vanish (its points became NaN)
-        assert "NaN" not in page.evaluate("Compose._api.svgString()")
-        assert not errs, errs
-        b.close()
+    page.evaluate("""(() => { const A = Compose._api, L = A.getL(); L.art.removeChildren();
+      const l = new paper.Path.Line({from: [20, 50], to: [120, 50], strokeColor: '#000', strokeWidth: 1}); L.art.addChild(l); A.commit(); A.select([l]); })()""")
+    type_in("X", 30 * k)
+    x, y, w, h = page.evaluate(bounds)
+    assert (x, y, w, h) == (30, 50, 100, 0)                             # a flat line used to vanish (its points became NaN)
+    assert "NaN" not in page.evaluate("Compose._api.svgString()")

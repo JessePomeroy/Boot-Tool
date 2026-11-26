@@ -6,24 +6,11 @@ import urllib.request
 import pytest
 
 from boottool.ui import coerce_params, make_server
-
-
-@pytest.fixture
-def server():
-    srv = make_server("127.0.0.1", 0)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
-    srv.shutdown()
-    srv.server_close()
+from conftest import call
 
 
 def _post(url, data, ctype="application/octet-stream"):
-    req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": ctype})
-    try:
-        with urllib.request.urlopen(req) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+    return call(url, data, ctype)[:2]
 
 
 def test_coerce_clamps_and_ignores_junk():

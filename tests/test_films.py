@@ -15,7 +15,7 @@ from boottool import printing as pr
 from boottool import raster
 from boottool import separate as sep
 
-from test_plates import _post, server  # noqa: F401 (server is a fixture)
+from conftest import call as _post
 
 
 def ink(im: Image.Image) -> np.ndarray:
@@ -187,37 +187,29 @@ def test_downloading_films_from_boot_tool(server, color):
         assert code == 400 and json.loads(body)["error"], bad
 
 
-def test_the_films_box_in_the_browser(server, color, tmp_path):
+def test_the_films_box_in_the_browser(server, color, tmp_path, page):
     """Print has a box "Films as pictures": a resolution to choose and two buttons."""
-    sync_api = pytest.importorskip("playwright.sync_api")
-    with sync_api.sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1400, "height": 900}, accept_downloads=True)
-        errs = []
-        page.on("pageerror", lambda e: errs.append(str(e)))
-        page.goto(server + "/")
-        png, tiff = "button:text-is('PNG — .zip, one per plate')", "button:text-is('TIFF — .zip, one per plate')"
-        page.click('a[data-t="print"]')
-        page.wait_for_selector(png)
-        assert page.is_disabled(png) and page.is_disabled(tiff)            # nothing to download yet
-        page.set_input_files("#file", str(color))
-        page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
-        page.click("#side span:text-is('Spot colour')")                    # (flat colours: quick to draw)
-        page.wait_for_function("lastRes.plates.length > 1", timeout=120000)
-        page.wait_for_function("(b => b.length === 2 && b.every(x => !x.disabled))([...document.querySelectorAll('button')].filter(x => x.textContent.includes('one per plate')))", timeout=20000)
-        on = "[...document.querySelectorAll('#side .cells span.on')].map(s => s.textContent).filter(t => /dpi/.test(t))"
-        assert page.evaluate(on) == ["600 dpi"]
-        page.click("#side span:text-is('300 dpi')")
-        assert page.evaluate(on) == ["300 dpi"]
-        with page.expect_download(timeout=180000) as d:
-            page.click(png)
-        assert d.value.suggested_filename == "color-print-films-300dpi-png.zip"
-        d.value.save_as(tmp_path / "f.zip")
-        z = zipfile.ZipFile(tmp_path / "f.zip")
-        assert len(z.namelist()) == page.evaluate("lastRes.plates.length") and Image.open(io.BytesIO(z.read(z.namelist()[0]))).size == (3508, 2480)
-        page.wait_for_function("document.querySelector('#toast').textContent === 'Films downloaded.'", timeout=20000)
-        with page.expect_download(timeout=180000) as d:
-            page.click(tiff)
-        assert d.value.suggested_filename == "color-print-films-300dpi-tiff.zip"
-        assert not errs, errs
-        b.close()
+    page.goto(server + "/")
+    png, tiff = "button:text-is('PNG — .zip, one per plate')", "button:text-is('TIFF — .zip, one per plate')"
+    page.click('a[data-t="print"]')
+    page.wait_for_selector(png)
+    assert page.is_disabled(png) and page.is_disabled(tiff)            # nothing to download yet
+    page.set_input_files("#file", str(color))
+    page.wait_for_function("lastRes && lastRes.plates && lastRes.plates.length > 0", timeout=120000)
+    page.click("#side span:text-is('Spot colour')")                    # (flat colours: quick to draw)
+    page.wait_for_function("lastRes.plates.length > 1", timeout=120000)
+    page.wait_for_function("(b => b.length === 2 && b.every(x => !x.disabled))([...document.querySelectorAll('button')].filter(x => x.textContent.includes('one per plate')))", timeout=20000)
+    on = "[...document.querySelectorAll('#side .cells span.on')].map(s => s.textContent).filter(t => /dpi/.test(t))"
+    assert page.evaluate(on) == ["600 dpi"]
+    page.click("#side span:text-is('300 dpi')")
+    assert page.evaluate(on) == ["300 dpi"]
+    with page.expect_download(timeout=180000) as d:
+        page.click(png)
+    assert d.value.suggested_filename == "color-print-films-300dpi-png.zip"
+    d.value.save_as(tmp_path / "f.zip")
+    z = zipfile.ZipFile(tmp_path / "f.zip")
+    assert len(z.namelist()) == page.evaluate("lastRes.plates.length") and Image.open(io.BytesIO(z.read(z.namelist()[0]))).size == (3508, 2480)
+    page.wait_for_function("document.querySelector('#toast').textContent === 'Films downloaded.'", timeout=20000)
+    with page.expect_download(timeout=180000) as d:
+        page.click(tiff)
+    assert d.value.suggested_filename == "color-print-films-300dpi-tiff.zip"

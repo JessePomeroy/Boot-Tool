@@ -1,3 +1,8 @@
+import json
+import threading
+import urllib.error
+import urllib.request
+
 import numpy as np
 import pytest
 from PIL import Image, ImageDraw
@@ -59,3 +64,55 @@ def _private_library(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("BOOTTOOL_LIBRARY", str(base / "Library"))
     monkeypatch.setenv("BOOTTOOL_FONTS", str(base / "Fonts"))
     monkeypatch.setenv("BOOTTOOL_PRINTS", str(base / "Prints"))
+
+
+@pytest.fixture
+def server():
+    """Boot Tool running on a free port: its address."""
+    from boottool.ui import make_server
+    srv = make_server("127.0.0.1", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    srv.server_close()
+
+
+@pytest.fixture(scope="session")
+def browser():
+    """One browser for the whole run (the tests that need one are skipped without Playwright)."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as p:
+        b = p.chromium.launch()
+        yield b
+        b.close()
+
+
+@pytest.fixture
+def page(browser):
+    """A fresh browser page. Afterwards it is closed, also when the test failed, and it must not
+    have reported any error of the page's own scripts."""
+    pg_ = browser.new_page(viewport={"width": 1400, "height": 900}, accept_downloads=True)
+    errors = []
+    pg_.on("pageerror", lambda e: errors.append(str(e)))
+    yield pg_
+    pg_.close()
+    assert not errors, errors
+
+
+def call(url, data=None, ctype="application/json", headers=None):
+    """GET, or POST when there is data (bytes as they are, anything else as JSON): the answer as
+    (status, body, headers), also when it is an error."""
+    if data is not None and not isinstance(data, bytes):
+        data = json.dumps(data).encode()
+    req = urllib.request.Request(url, data=data, headers={**({"Content-Type": ctype} if data is not None else {}), **(headers or {})})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+
+
+def call_json(url, data=None):
+    """The same, for answers in JSON: (status, what it says)."""
+    status, body, _ = call(url, data)
+    return status, json.loads(body)

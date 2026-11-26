@@ -8,7 +8,8 @@ from PIL import Image
 from boottool import page as pg
 from boottool import printing as pr
 
-from test_plates import _post, ok, server  # noqa: F401 (server is a fixture)
+from conftest import call as _post
+from test_plates import ok
 
 
 def _naive_floyd(t):
