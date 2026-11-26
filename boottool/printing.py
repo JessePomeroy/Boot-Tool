@@ -427,9 +427,10 @@ def _underbase_mask(printed: np.ndarray, mm_px: float) -> np.ndarray:
     The pulling in is done in whole pixels, never less than one. In a small picture one pixel can be
     a millimetre or more on the page, so a line two pixels thick lost all its white. Where pixels
     are that big the shape is drawn finer first (about eight to the millimetre), and what comes
-    back is that finer picture."""
+    back is that finer picture. Up to 0.35 mm nothing is done differently: the usual dither (0.3 mm,
+    give or take the rounding to the page) and every finer picture give the plates they always gave."""
     m = (printed > 0.03).astype(np.uint8)
-    if mm_px > 0.3:
+    if mm_px > 0.35:
         h, w = m.shape
         finer = min(int(round(mm_px / 0.125)), int((25e6 / (w * h)) ** 0.5))      # (not past 25 million pixels)
         if finer > 1:
@@ -539,13 +540,14 @@ def _flat(rgb: np.ndarray, p: PrintParams, page: PageOpts) -> Job:
             gar = np.median(border, axis=0).astype(np.uint8)                       # the design's own paper
             printed = (np.abs(rgb.astype(np.int16) - gar.astype(np.int16)).sum(2) > 24).astype(np.float32)
             ub = _underbase_mask(printed, mm_px)
-            two = np.empty(ub.shape + (3,), np.uint8); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)   # (ub may be finer than the picture)
-            f2 = os.path.join(td, "under.png")
-            Image.fromarray(two).save(f2)
-            ju = sep.build(f2, sep.SepParams(inks=1, paper=True, trap=0.0, speckle=p.speckle, smooth=p.smooth), page)
-            if ju.plates:
-                u = ju.plates[0]
-                job.plates.insert(0, Plate("White underbase", "#ffffff", u.body))
+            if ub.any():                 # (with nothing left to put white under, the one plate made was the whole picture in white)
+                two = np.empty(ub.shape + (3,), np.uint8); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)   # (ub may be finer than the picture)
+                f2 = os.path.join(td, "under.png")
+                Image.fromarray(two).save(f2)
+                ju = sep.build(f2, sep.SepParams(inks=1, paper=True, trap=0.0, speckle=p.speckle, smooth=p.smooth), page)
+                if ju.plates:
+                    u = ju.plates[0]
+                    job.plates.insert(0, Plate("White underbase", "#ffffff", u.body))
     job.info["kind"] = "flat"
     if p.dark:
         job.info["garment"] = p.dark_bg

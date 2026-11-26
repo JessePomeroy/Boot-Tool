@@ -96,11 +96,22 @@ def test_a_thin_line_in_a_small_picture_keeps_its_white_with_flat_colours(tmp_pa
     f = tmp_path / "picture.png"
     Image.fromarray(_thin_line()).save(f)
     j = pr.build(f, pr.PrintParams(method="spot", kind="flat", dark=True, underbase=True), pg.PageOpts())
-    assert j.plates[0].name == "White underbase" and len(j.plates) > 1     # the plate used to be left out altogether
+    assert j.plates[0].name == "White underbase" and len(j.plates) > 1
     mm = j.art[2] / 100
     white, ink = plate_mask(j, j.plates[0], 10), np.any([plate_mask(j, p, 10) for p in j.plates[1:]], axis=0)
     assert white.sum() / 100 > 0.6 * (60 * mm) * (2 * mm)
-    assert (white & ~ink).sum() / 100 < 3                                   # and it lies under the ink (mm² that do not)
+    assert (white & ~ink).sum() / 100 < 3                                   # and it lies under the ink (it was white over the whole picture)
+
+
+def test_artwork_too_thin_for_white_gets_none_with_flat_colours(tmp_path):
+    """A line under half a millimetre has nothing left once the white is pulled in. The white plate
+    then covered the whole picture, a white block on the shirt; now there is no white plate."""
+    a = np.full((400, 400, 3), 255, np.uint8)
+    a[200, 80:320] = 0                                                      # one pixel: about 0.4 mm in print
+    f = tmp_path / "picture.png"
+    Image.fromarray(a).save(f)
+    j = pr.build(f, pr.PrintParams(method="spot", kind="flat", dark=True, underbase=True), pg.PageOpts())
+    assert j.plates and "White underbase" not in [p.name for p in j.plates]
 
 
 def test_the_white_is_worked_out_in_millimetres_whatever_the_pictures_size():
@@ -118,3 +129,4 @@ def test_the_white_is_worked_out_in_millimetres_whatever_the_pictures_size():
     assert (left - 5) * 1.5 == pytest.approx(0.25, abs=0.15)               # a quarter of a millimetre in (it was 1.5 mm)
     fine = pr._underbase_mask(np.kron(printed, np.ones((12, 12), np.float32)), 0.125)
     assert fine.shape == (480, 480)                                        # a picture that is fine enough is used as it is
+    assert pr._underbase_mask(printed, 0.3002).shape == (40, 40)           # and so is the usual dither (0.3 mm, rounded to the page)
