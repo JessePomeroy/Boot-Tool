@@ -89,7 +89,7 @@ def test_analyse_reports_histogram_and_auto_levels(ramp, lineart):
     ({"method": "spot", "kind": "flat", "inks": 3}, None),
 ])
 def test_every_method_builds_valid_plates(color, kw, plates):
-    job = pr.build(color, pr.coerce_print(kw), pg.PageOpts())
+    job = pr.build(color, pr.coerce_print(kw), pg.PageOpts(size="A5"))
     if plates:
         assert len(job.plates) == plates
     assert job.plates
@@ -127,8 +127,8 @@ def test_dither_size_controls_grain_and_has_a_cap(ramp):
 
 
 def test_cmyk_colours_are_preview_only(color):
-    std = pr.build(color, pr.coerce_print({"method": "cmyk"}), pg.PageOpts())
-    custom = pr.build(color, pr.coerce_print({"method": "cmyk", "cmyk_colors": ["#112233", "", "", ""]}), pg.PageOpts())
+    std = pr.build(color, pr.coerce_print({"method": "cmyk"}), pg.PageOpts(size="A5"))
+    custom = pr.build(color, pr.coerce_print({"method": "cmyk", "cmyk_colors": ["#112233", "", "", ""]}), pg.PageOpts(size="A5"))
     assert custom.plates[0].ink == "#112233" and std.plates[0].ink == "#00aeef"
     assert [p.body for p in std.plates] == [p.body for p in custom.plates]      # separation unchanged
     assert [p.name for p in custom.plates] == ["Cyan", "Magenta", "Yellow", "Black"]
@@ -136,9 +136,9 @@ def test_cmyk_colours_are_preview_only(color):
 
 
 def test_spot_photo_uses_your_ink_colours_for_the_separation(color):
-    auto = pr.build(color, pr.coerce_print({"method": "spot", "kind": "photo", "inks": 3}), pg.PageOpts())
-    mine = pr.build(color, pr.coerce_print({"method": "spot", "kind": "photo", "inks": 3, "colors": ["#00ff00"]}), pg.PageOpts())
-    again = pr.build(color, pr.coerce_print({"method": "spot", "kind": "photo", "inks": 3}), pg.PageOpts())
+    auto = pr.build(color, pr.coerce_print({"method": "spot", "kind": "photo", "inks": 3}), pg.PageOpts(size="A5"))
+    mine = pr.build(color, pr.coerce_print({"method": "spot", "kind": "photo", "inks": 3, "colors": ["#00ff00"]}), pg.PageOpts(size="A5"))
+    again = pr.build(color, pr.coerce_print({"method": "spot", "kind": "photo", "inks": 3}), pg.PageOpts(size="A5"))
     assert again.info["palette"] == auto.info["palette"]                        # steady between redraws
     g = mine.info["palette"][0]["hex"]
     assert int(g[3:5], 16) > 230 and int(g[1:3], 16) < 30                        # your green, give or take rounding
@@ -215,13 +215,13 @@ def test_draft_preview_is_coarser_but_downloads_stay_full(color):
     from boottool import page as pg
     from boottool import printing as pr
     from boottool.ui import Engine, download_response
-    full = pr.build(color, pr.coerce_print({"method": "cmyk"}), pg.PageOpts())
-    draft = pr.build(color, pr.coerce_print({"method": "cmyk", "draft": True}), pg.PageOpts())
+    full = pr.build(color, pr.coerce_print({"method": "cmyk"}), pg.PageOpts(size="A5"))
+    draft = pr.build(color, pr.coerce_print({"method": "cmyk", "draft": True}), pg.PageOpts(size="A5"))
     assert draft.info["draft"] and not full.info["draft"]
     assert draft.info["ppi"] < full.info["ppi"] and [p.name for p in draft.plates] == [p.name for p in full.plates]
     assert pr.coerce_print({"draft": "x"}).draft is True
     # dither has no draft mode
-    assert not pr.build(color, pr.coerce_print({"render": "dither", "draft": True}), pg.PageOpts()).info["draft"]
+    assert not pr.build(color, pr.coerce_print({"render": "dither", "draft": True}), pg.PageOpts(size="A5")).info["draft"]
 
 
 def _mix_image(path):

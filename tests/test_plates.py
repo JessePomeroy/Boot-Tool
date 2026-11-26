@@ -52,7 +52,7 @@ def test_halftone_shapes(lineart, shape):
 
 
 def test_halftone_cmyk_and_errors(color, lineart):
-    job = ht.build(color, ht.HalftoneParams(mode="cmyk"), pg.PageOpts(size="A3", orientation="portrait"))
+    job = ht.build(color, ht.HalftoneParams(mode="cmyk", lpi=15, ppi=100), pg.PageOpts(size="A3", orientation="portrait"))   # (a coarse screen: quick to make)
     assert [p.name for p in job.plates] == ["Cyan", "Magenta", "Yellow", "Black"]
     assert job.page == (297, 420)
     with pytest.raises(ValueError, match="Draw a shape"):
