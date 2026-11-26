@@ -57,6 +57,7 @@ Screen-print plates on a real page. Pick a **Method**:
 - **Layered SVG**: one file, one layer per plate. **.zip**: one SVG per plate.
 - **PDF**: one file, one page per plate, at the page's real size. **.zip**: one PDF per plate.
 - Downloads are always pure black. The preview keeps ink colours; the single-plate tabs show the film as it will print.
+- **Films as pictures**: a .zip with one black-and-white PNG or TIFF per plate, at 300, 600 or 1200 dpi.
 
 ## Notes and limits
 
