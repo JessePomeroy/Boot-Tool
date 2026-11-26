@@ -113,6 +113,10 @@ def test_double_clicking_a_library_name_in_compose_renames_without_adding_copies
         page.keyboard.type("crest")
         page.keyboard.press("Enter")
         page.wait_for_function("document.querySelector('#clibStrip .ltn').textContent === 'crest'", timeout=10000)
+        for _ in range(100):                                              # (the name on screen is what was typed; the library follows a moment later)
+            if [i["name"] for i in library.listing()] == ["crest.svg"]:
+                break
+            page.wait_for_timeout(100)
         assert [i["name"] for i in library.listing()] == ["crest.svg"]
         page.wait_for_timeout(800)
         assert page.evaluate(count) == before                             # ...and adds nothing to the page (it used to add two copies)
