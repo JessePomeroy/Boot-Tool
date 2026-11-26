@@ -5,16 +5,14 @@ plate's film as the SVG has it (page.py): the artwork, the registration marks an
 drawn dot for dot. One bit per dot, black or white, nothing in between, with the resolution written
 into the file so that it prints at its real size.
 
-The film is drawn here with numpy and Pillow, which Boot Tool already uses: no SVG program is
-needed. A dot is black when its centre lies inside a shape, so shapes come out neither fatter nor
-thinner than they are (halftone dots keep their tone). Only what films are made of is understood (groups, paths, rectangles and one line of
-text, in black). Anything else stops with an error rather than being left out of a film.
+The film (read by film.py, as for the PDF export) is drawn here with numpy and Pillow, which Boot
+Tool already uses: no SVG program is needed. A dot is black when its centre lies inside a shape,
+so shapes come out neither fatter nor thinner than they are (halftone dots keep their tone).
 """
 from __future__ import annotations
 
 import io
 import math
-import re
 import struct
 import unicodedata
 import zipfile
@@ -22,14 +20,13 @@ import zipfile
 import numpy as np
 from fontTools.pens.basePen import BasePen
 from fontTools.svgLib.path import parse_path
-from lxml import etree
 from PIL import Image, ImageDraw, ImageFont
 
-from .page import Job, _film_group, slug
+from . import film
+from .page import Job, slug
 
 DPI = (300, 600, 1200)
 MAX_DOTS = 450_000_000          # A3 at 1200 dpi is 278 million dots; much more than that is no longer one picture
-_BLACK = {"#000", "#000000", "black"}
 _BAND = 256                     # rows drawn at a time, to keep memory small
 _FLAT = 0.02                    # curves are cut into straight pieces that stay within a fiftieth of a dot (small dots keep their area)
 
@@ -71,52 +68,10 @@ class _Outlines(BasePen):
         self.cur = None
 
 
-def _times(m, n):
-    """Transform m, then n (each a, b, c, d, e, f as SVG writes them)."""
-    return (m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3], m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3],
-            m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5])
-
-
-def _matrix(text: str, m):
-    rest = text.strip()
-    while rest:
-        got = re.match(r"(\w+)\s*\(([^)]*)\)\s*,?\s*", rest)
-        if not got:
-            raise ValueError(f"A plate has a transform that cannot be drawn as a picture: {text!r}")
-        v = [float(x) for x in re.split(r"[\s,]+", got.group(2).strip()) if x]
-        kind = got.group(1)
-        if kind == "translate" and len(v) in (1, 2):
-            step = (1, 0, 0, 1, v[0], v[1] if len(v) == 2 else 0)
-        elif kind == "scale" and len(v) in (1, 2):
-            step = (v[0], 0, 0, v[-1], 0, 0)
-        elif kind == "matrix" and len(v) == 6:
-            step = tuple(v)
-        else:
-            raise ValueError(f"A plate has a transform that cannot be drawn as a picture: {text!r}")
-        m = _times(step, m)
-        rest = rest[got.end():]
-    return m
-
-
 def _placed(points, m) -> np.ndarray:
     """Points of a path, where they come to lie in the picture (in dots)."""
     p = np.asarray(points, np.float64)
     return np.stack([p[:, 0] * m[0] + p[:, 1] * m[2] + m[4], p[:, 0] * m[1] + p[:, 1] * m[3] + m[5]], axis=1)
-
-
-def _paint(el, inherited: dict) -> dict:
-    st = dict(inherited)
-    for k in ("fill", "stroke"):
-        v = el.get(k)
-        if v is not None:
-            if v != "none" and v.lower() not in _BLACK:
-                raise ValueError(f"A plate has a colour other than black ({v!r}); films are pure black.")
-            st[k] = v != "none"
-    if el.get("stroke-width") is not None:
-        st["width"] = float(el.get("stroke-width"))
-    if el.get("fill-rule") is not None:
-        st["evenodd"] = el.get("fill-rule") == "evenodd"
-    return st
 
 
 def _lines(subs, half: float) -> list[np.ndarray]:
@@ -134,44 +89,29 @@ def _lines(subs, half: float) -> list[np.ndarray]:
     return out
 
 
-def _walk(el, m, st: dict, shapes: list, texts: list) -> None:
-    """Collect what is to be drawn: shapes as (rule, outlines in dots), texts as (x, y, size, gap, words)."""
-    tag = etree.QName(el).localname
-    st = _paint(el, st)
-    scale = math.sqrt(abs(m[0] * m[3] - m[1] * m[2]))                       # dots per unit here
-    if tag == "g":
-        m = _matrix(el.get("transform") or "", m)
-        for child in el:
-            _walk(child, m, st, shapes, texts)
-    elif tag == "path":
-        if el.get("transform"):
-            raise ValueError("A plate has a path with its own transform; it cannot be drawn as a picture.")
-        pen = _Outlines(scale)
-        parse_path(el.get("d") or "", pen)
-        pen.done(False)
-        subs = [(_placed(pts, m), closed) for pts, closed in pen.subs]
-        if st["fill"] and subs:
-            shapes.append(("evenodd" if st["evenodd"] else "nonzero", [p for p, _ in subs]))
-        if st["stroke"] and subs:
-            shapes.append(("nonzero", _lines(subs, st["width"] * scale / 2)))
-    elif tag == "rect":
-        if el.get("transform") or el.get("rx") or el.get("ry") or abs(m[1]) > 1e-12 or abs(m[2]) > 1e-12:
+def _outlined(shape: film.Shape, m: tuple) -> list:
+    """A film shape as what is to be blackened: [(rule, outlines in dots)]. m takes its numbers to dots."""
+    scale = math.sqrt(abs(m[0] * m[3] - m[1] * m[2]))                       # dots per unit of the shape
+    if shape.d is None:
+        if abs(m[1]) > 1e-12 or abs(m[2]) > 1e-12:
             raise ValueError("A plate has a rectangle that cannot be drawn as a picture.")
-        x, y, w, h = (float(el.get(k) or 0) for k in ("x", "y", "width", "height"))
+        x, y, w, h = shape.box
 
         def box(grow):
             return _placed([(x - grow, y - grow), (x + w + grow, y - grow), (x + w + grow, y + h + grow), (x - grow, y + h + grow)], m)
-        if st["fill"]:
-            shapes.append(("nonzero", [box(st["width"] / 2 if st["stroke"] else 0)]))
-        elif st["stroke"]:                                                 # a frame: the outside of its line, less the inside
-            shapes.append(("evenodd", [box(st["width"] / 2), box(-st["width"] / 2)]))
-    elif tag == "text":
-        if len(el) or el.get("transform"):
-            raise ValueError("A plate has text that cannot be drawn as a picture.")
-        x, y = _placed([(float(el.get("x") or 0), float(el.get("y") or 0))], m)[0]
-        texts.append((x, y, float(el.get("font-size") or 4.2) * scale, float(el.get("letter-spacing") or 0) * scale, el.text or ""))
-    else:
-        raise ValueError(f"A plate has something that cannot be drawn as a picture (<{tag}>).")
+        if shape.fill:
+            return [("nonzero", [box((shape.stroke or 0) / 2)])]
+        return [("evenodd", [box(shape.stroke / 2), box(-shape.stroke / 2)])] if shape.stroke else []   # a frame: outside less inside
+    pen = _Outlines(scale)
+    parse_path(shape.d, pen)
+    pen.done(False)
+    subs = [(_placed(pts, m), closed) for pts, closed in pen.subs]
+    out = []
+    if shape.fill and subs:
+        out.append(("evenodd" if shape.evenodd else "nonzero", [p for p, _ in subs]))
+    if shape.stroke is not None and subs:
+        out.append(("nonzero", _lines(subs, shape.stroke * scale / 2)))
+    return out
 
 
 def _edges(outlines: list) -> tuple:
@@ -242,15 +182,15 @@ def plate_picture(job: Job, i: int, dpi: int) -> Image.Image:
     if W * H > MAX_DOTS:
         raise ValueError(f"At {dpi} dpi this page would be a picture of {W * H // 1_000_000} million dots, which is too big. "
                          f"Choose a lower resolution.")
-    try:
-        film = etree.fromstring(f'<svg xmlns="http://www.w3.org/2000/svg">{_film_group(job, i, ident=False)}</svg>'.encode("utf-8"),
-                                etree.XMLParser(huge_tree=True))
-    except etree.XMLSyntaxError:
-        raise ValueError(f"Plate {i + 1} could not be drawn as a picture. If its ink name has unusual characters in it, "
-                         f"type the name again and try once more.") from None
     shapes, texts = [], []
-    for el in film:
-        _walk(el, (k, 0, 0, k, 0, 0), {"fill": True, "stroke": False, "width": 1.0, "evenodd": False}, shapes, texts)
+    for it in film.read(job, i, "drawn as a picture"):
+        m = film.times(it.matrix, (k, 0, 0, k, 0, 0))                       # page millimetres -> dots
+        if isinstance(it, film.Text):
+            x, y = _placed([(it.x, it.y)], m)[0]
+            scale = math.sqrt(abs(m[0] * m[3] - m[1] * m[2]))
+            texts.append((x, y, it.size * scale, it.gap * scale, it.words))
+        else:
+            shapes += _outlined(it, m)
     ready = []
     for rule, outlines in shapes:
         if any(not np.isfinite(c).all() for c in outlines):

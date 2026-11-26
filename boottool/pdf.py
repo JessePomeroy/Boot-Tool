@@ -5,25 +5,21 @@ shapes (page.py), so this writes those same shapes into a PDF: the artwork, the 
 and the plate's name, exactly where the SVG film has them. It is made from the SVG film itself, so
 the two cannot drift apart, and it needs no extra library.
 
-Only what the films are made of is understood (groups, paths, rectangles and one line of text, in
-black). Anything else stops with an error rather than being left out of a film without a word.
+The film is read by film.py, which the picture export (raster.py) uses too.
 """
 from __future__ import annotations
 
 import io
 import math
-import re
 import zipfile
 import zlib
 
 from fontTools.pens.basePen import BasePen
 from fontTools.svgLib.path import parse_path
-from lxml import etree
 
-from . import __version__
-from .page import PT, Job, _film_group, slug
+from . import __version__, film
+from .page import PT, Job, slug
 
-_BLACK = {"#000", "#000000", "black"}
 _NARROW = 82                          # % of Helvetica's width: about as wide as the SVG's Arial Narrow
 
 
@@ -71,50 +67,12 @@ class _PathPen(BasePen):
         self.out.append("h")
 
 
-def _matrix(text: str) -> list[str]:
-    """An SVG transform as PDF "cm" lines (translate, scale and matrix: what the films use)."""
-    out, rest = [], text.strip()
-    while rest:
-        m = re.match(r"(\w+)\s*\(([^)]*)\)\s*,?\s*", rest)
-        if not m:
-            raise ValueError(f"A plate has a transform that cannot be written as PDF: {text!r}")
-        v = [float(x) for x in re.split(r"[\s,]+", m.group(2).strip()) if x]
-        kind = m.group(1)
-        if kind == "translate" and len(v) in (1, 2):
-            mat = (1, 0, 0, 1, v[0], v[1] if len(v) == 2 else 0)
-        elif kind == "scale" and len(v) in (1, 2):
-            mat = (v[0], 0, 0, v[-1], 0, 0)
-        elif kind == "matrix" and len(v) == 6:
-            mat = tuple(v)
-        else:
-            raise ValueError(f"A plate has a transform that cannot be written as PDF: {text!r}")
-        out.append(" ".join(_m(x) for x in mat) + " cm")
-        rest = rest[m.end():]
-    return out
-
-
-def _paint(el, inherited: dict) -> dict:
-    """Fill, outline and line width of an element: its own, or what its group gave it."""
-    st = dict(inherited)
-    for k in ("fill", "stroke"):
-        v = el.get(k)
-        if v is not None:
-            if v != "none" and v.lower() not in _BLACK:
-                raise ValueError(f"A plate has a colour other than black ({v!r}); films are pure black.")
-            st[k] = v != "none"
-    if el.get("stroke-width") is not None:
-        st["width"] = float(el.get("stroke-width"))
-    if el.get("fill-rule") is not None:
-        st["evenodd"] = el.get("fill-rule") == "evenodd"
-    return st
-
-
-def _draw(st: dict) -> list[str]:
-    if st["fill"] and st["stroke"]:
-        return [f"{_r(st['width'])} w", "B*" if st["evenodd"] else "B"]
-    if st["stroke"]:
-        return [f"{_r(st['width'])} w", "S"]
-    return ["f*" if st["evenodd"] else "f"] if st["fill"] else ["n"]
+def _draw(shape: film.Shape) -> list[str]:
+    """Fill it, outline it, or both, as the film says."""
+    rule = "*" if shape.evenodd else ""
+    if shape.stroke is None:
+        return ["f" + rule] if shape.fill else ["n"]
+    return [f"{_r(shape.stroke)} w", "B" + rule if shape.fill else "S"]
 
 
 def _pdf_text(s: str) -> str:
@@ -123,52 +81,27 @@ def _pdf_text(s: str) -> str:
     return "".join("\\" + chr(b) if b in b"()\\" else chr(b) if 32 <= b <= 126 else f"\\{b:03o}" for b in raw)
 
 
-def _walk(el, st: dict, out: list) -> None:
-    tag = etree.QName(el).localname
-    st = _paint(el, st)
-    if tag == "g":
-        out.append("q")
-        out.extend(_matrix(el.get("transform") or ""))
-        for child in el:
-            _walk(child, st, out)
-        out.append("Q")
-    elif tag == "path":
-        if el.get("transform"):
-            raise ValueError("A plate has a path with its own transform; it cannot be written as PDF.")
-        d = el.get("d") or ""
-        if d.strip():
-            parse_path(d, _PathPen(out))
-            out.extend(_draw(st))
-    elif tag == "rect":
-        if el.get("transform") or el.get("rx") or el.get("ry"):
-            raise ValueError("A plate has a rectangle that cannot be written as PDF.")
-        x, y, w, h = (float(el.get(k) or 0) for k in ("x", "y", "width", "height"))
-        out.append(f"{_r(x)} {_r(y)} {_r(w)} {_r(h)} re")
-        out.extend(_draw(st))
-    elif tag == "text":
-        if len(el) or el.get("transform"):
-            raise ValueError("A plate has text that cannot be written as PDF.")
-        size, gap = float(el.get("font-size") or 4.2), float(el.get("letter-spacing") or 0)
-        # the page is drawn with y running down, as in the SVG; letters are turned upright again here
-        out.append(f"BT /F1 {_r(size)} Tf {_r(gap * 100 / _NARROW)} Tc {_NARROW} Tz "
-                   f"1 0 0 -1 {_r(float(el.get('x') or 0))} {_r(float(el.get('y') or 0))} Tm ({_pdf_text(el.text or '')}) Tj ET")
-    else:
-        raise ValueError(f"A plate has something that cannot be written as PDF (<{tag}>).")
-
-
 def _page_stream(job: Job, i: int) -> bytes:
     """Everything on plate i's film, as PDF drawing operators (in millimetres, y running down)."""
     pw, ph = job.page
-    try:
-        film = etree.fromstring(f'<svg xmlns="http://www.w3.org/2000/svg">{_film_group(job, i, ident=False)}</svg>'.encode("utf-8"),
-                                etree.XMLParser(huge_tree=True))
-    except etree.XMLSyntaxError:       # in practice: a character in an ink's name that no file can hold (pasted in, not typed)
-        raise ValueError(f'Plate {i + 1} could not be written as PDF. If its ink name has unusual characters in it, '
-                         f'type the name again and try once more.') from None
     k = 1 / PT                                                             # points per millimetre
     out = ["q", f"{_m(k)} 0 0 {_m(-k)} 0 {_m(ph * k)} cm", "0 g", "0 G"]
-    for el in film:
-        _walk(el, {"fill": True, "stroke": False, "width": 1.0, "evenodd": False}, out)
+    for it in film.read(job, i, "written as PDF"):
+        moved = it.matrix != film.PLAIN
+        if moved:
+            out += ["q", " ".join(_m(x) for x in it.matrix) + " cm"]
+        if isinstance(it, film.Text):
+            # the page is drawn with y running down, as in the SVG; letters are turned upright again here
+            out.append(f"BT /F1 {_r(it.size)} Tf {_r(it.gap * 100 / _NARROW)} Tc {_NARROW} Tz "
+                       f"1 0 0 -1 {_r(it.x)} {_r(it.y)} Tm ({_pdf_text(it.words)}) Tj ET")
+        else:
+            if it.d is None:
+                out.append(" ".join(_r(v) for v in it.box) + " re")
+            else:
+                parse_path(it.d, _PathPen(out))
+            out += _draw(it)
+        if moved:
+            out.append("Q")
     out.append("Q")
     return "\n".join(out).encode("ascii")
 
