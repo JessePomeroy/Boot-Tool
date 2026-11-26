@@ -43,6 +43,22 @@ def test_tabs_and_choices_work_with_the_keyboard(server, color, page):
     page.keyboard.press("Enter")
     assert page.evaluate("mode") == "orig"
 
+    page.evaluate("zoomTo(3, 100, 100)")                               # the zoom buttons at the end of that row
+    for _ in range(12):
+        page.keyboard.press("Tab")
+        if page.evaluate(FOCUS) == "Fit":
+            break
+    page.keyboard.press("Enter")
+    assert page.evaluate(FOCUS) == "Fit" and page.evaluate("view.s") != 3
+
+    page.locator('a[data-t="convert"]').focus()                        # and, in Convert, the background behind the picture
+    page.keyboard.press("Enter")
+    page.wait_for_function("tool === 'convert'")
+    page.locator("#bgs > div:text-is('Black')").focus()
+    page.keyboard.press(" ")
+    assert page.evaluate("document.querySelector('#bgs .on').textContent") == "Black"
+    page.locator("#toolbar [data-m=orig]").focus()
+
     assert page.evaluate("[document.activeElement.getAttribute('role'), document.querySelector('#toolbar [data-m=orig]').getAttribute('aria-pressed'), "
                          "document.querySelector('#toolbar [data-m=svg]').getAttribute('aria-pressed')]") == ["button", "true", "false"]
 
