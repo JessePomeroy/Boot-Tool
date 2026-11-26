@@ -219,7 +219,7 @@ def build(path, p: HalftoneParams, page: PageOpts) -> Job:
         if p.smoothing > 0:
             plane = cv2.GaussianBlur(plane.astype(np.float32), (0, 0), p.smoothing)
         mask = _screen(_tone(plane, p), cell_px, ang, table, p.shape, stamp)
-        d = mask_to_path(mask, tp)
+        d = mask_to_path(mask, tp, edge=True)                               # (ink at the picture's edge is outlined along it)
         body = (f'<g transform="translate({ax:.3f} {ay:.3f}) scale({px_mm:.6f})">'
                 f'<path fill-rule="evenodd" d="{d}"/></g>') if d else ""
         job.plates.append(Plate(name, ink, body))

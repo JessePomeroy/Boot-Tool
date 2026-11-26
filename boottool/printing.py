@@ -422,8 +422,19 @@ def _design_region(dark: np.ndarray, mm_px: float, outline_mm: float) -> np.ndar
 
 
 def _underbase_mask(printed: np.ndarray, mm_px: float) -> np.ndarray:
-    """Solid shape under everything that prints, pulled in a little so white never peeks out."""
+    """Solid shape under everything that prints, pulled in a little so white never peeks out.
+
+    The pulling in is done in whole pixels, never less than one. In a small picture one pixel can be
+    a millimetre or more on the page, so a line two pixels thick lost all its white. Where pixels
+    are that big the shape is drawn finer first (about eight to the millimetre), and what comes
+    back is that finer picture."""
     m = (printed > 0.03).astype(np.uint8)
+    if mm_px > 0.3:
+        h, w = m.shape
+        finer = min(int(round(mm_px / 0.125)), int((25e6 / (w * h)) ** 0.5))      # (not past 25 million pixels)
+        if finer > 1:
+            m = (cv2.resize(m * 255, (w * finer, h * finer), interpolation=cv2.INTER_LINEAR) > 127).astype(np.uint8)
+            mm_px /= finer
     k = max(1, int(round(0.8 / mm_px)))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
     e = max(1, int(round(0.25 / mm_px)))
@@ -450,7 +461,11 @@ def _plate_specs(rgb: np.ndarray, p: PrintParams, W: int, H: int, aw: float = 0.
                 region = _design_region(plane, mm_px, p.outline_mm)
                 plane = (1 - plane) * cv2.GaussianBlur(region.astype(np.float32), (0, 0), 0.6)
             if p.underbase and not _is_white(p.ink):
-                ub = _underbase_mask(plane, mm_px)
+                # The white goes under what prints: the picture after Tone (brightness, contrast, invert),
+                # which the ink plate is made from too (after smoothing it, if that is set). Taken from
+                # the picture before Tone, the white lay under the wrong half of an inverted picture, and
+                # under greys that Tone had turned to no ink.
+                ub = _underbase_mask(ht._tone(np.clip(plane, 0, 1), p), mm_px)
                 return ([("White underbase", "#ffffff", 0.0), ("Ink", p.ink, p.angle)],
                         (lambda i: ub if i == 0 else plane), {"garment": p.dark_bg})
             return [("Ink", p.ink, p.angle)], (lambda i: plane), {"garment": p.dark_bg}
@@ -524,7 +539,7 @@ def _flat(rgb: np.ndarray, p: PrintParams, page: PageOpts) -> Job:
             gar = np.median(border, axis=0).astype(np.uint8)                       # the design's own paper
             printed = (np.abs(rgb.astype(np.int16) - gar.astype(np.int16)).sum(2) > 24).astype(np.float32)
             ub = _underbase_mask(printed, mm_px)
-            two = np.empty_like(rgb); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)
+            two = np.empty(ub.shape + (3,), np.uint8); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)   # (ub may be finer than the picture)
             f2 = os.path.join(td, "under.png")
             Image.fromarray(two).save(f2)
             ju = sep.build(f2, sep.SepParams(inks=1, paper=True, trap=0.0, speckle=p.speckle, smooth=p.smooth), page)
@@ -600,7 +615,7 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
         masks, sw, sh = solid
         if not masks[i].any():
             return "", 0
-        sd = mask_to_path(masks[i], Params(speckle=0, smooth_sigma=0.6, epsilon=0.8, corner_deg=125.0, precision=1), fast=p.draft)
+        sd = mask_to_path(masks[i], Params(speckle=0, smooth_sigma=0.6, epsilon=0.8, corner_deg=125.0, precision=1), fast=p.draft, edge=True)
         return ((f'<g transform="translate({ax:.3f} {ay:.3f}) scale({aw / sw:.6f} {ah / sh:.6f})">'
                  f'<path fill-rule="evenodd" d="{sd}"/></g>') if sd else ""), sd.count("M")
 
@@ -610,7 +625,7 @@ def build(path, p: PrintParams, page: PageOpts) -> Job:
         if specs[i][0] == "White underbase":                       # a solid, never screened
             t = np.where(_to_grid(plane(i), W, H, 0) > 0.5, 1.0, 0.0).astype(np.float32)
         if p.render == "screen":
-            d = mask_to_path(ht._screen(t, cell_px, ang, table, p.shape, stamp), tp, fast=p.draft)
+            d = mask_to_path(ht._screen(t, cell_px, ang, table, p.shape, stamp), tp, fast=p.draft, edge=True)   # (ink at the picture's edge is outlined along it)
             body = (f'<g transform="translate({ax:.3f} {ay:.3f}) scale({px_mm:.6f})">'
                     f'<path fill-rule="evenodd" d="{d}"/></g>') if d else ""
             sb, sn = solid_body(i)
