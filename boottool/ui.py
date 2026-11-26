@@ -172,16 +172,20 @@ def _plate_job(engine: "Engine", tool: str, image_id: str, raw: dict):
     return job
 
 
+def _file_job(engine: "Engine", req: dict):
+    """The plates a file is made from: at full quality (files are never drafts). What is made from
+    them is made after the lock is let go: it can take some seconds, and finished plates are not changed."""
+    if isinstance(req.get("params"), dict):
+        req = {**req, "params": {**req["params"], "draft": False}}
+    with engine.lock:
+        return _plate_job(engine, req.get("tool", ""), req["id"], req)
+
+
 def films_response(engine: "Engine", req: dict) -> bytes:
     """A .zip of the plates as pictures (PNG or TIFF) at the resolution asked for."""
     fmt, dpi = str(req.get("format", "png")), req.get("dpi", 600)
     check_films(fmt, dpi)                                                # (before the plates are made: that can take a while)
-    if isinstance(req.get("params"), dict):
-        req = {**req, "params": {**req["params"], "draft": False}}      # files are never drafts
-    with engine.lock:
-        job = _plate_job(engine, req.get("tool", ""), req["id"], req)
-    # drawn after the lock is let go: it takes some seconds, and the plates themselves are finished and not changed
-    return films_zip(job, fmt, dpi)
+    return films_zip(_file_job(engine, req), fmt, dpi)
 
 
 def plates_response(engine: "Engine", req: dict):
@@ -206,22 +210,16 @@ def plates_response(engine: "Engine", req: dict):
 
 
 def download_response(engine: "Engine", req: dict):
-    if isinstance(req.get("params"), dict):
-        req = {**req, "params": {**req["params"], "draft": False}}      # files are never drafts
-    with engine.lock:
-        job = _plate_job(engine, req.get("tool", ""), req["id"], req)
-        if not job.plates:
-            raise ValueError("Nothing to download: no plates were produced.")
-        kind = req.get("kind")
-        if kind == "zip":
-            return plates_zip(job), "application/zip"
-        if kind not in ("pdf", "pdfzip"):
-            return layered_svg(job).encode("utf-8"), "image/svg+xml"
-    # A PDF of fine halftones takes a few seconds to write: done after the lock is let go, so other
-    # requests need not wait for it to finish (the plates themselves are finished and not changed).
+    job, kind = _file_job(engine, req), req.get("kind")
+    if not job.plates:
+        raise ValueError("Nothing to download: no plates were produced.")
+    if kind == "zip":
+        return plates_zip(job), "application/zip"
     if kind == "pdf":
         return plates_pdf(job), "application/pdf"
-    return plates_pdf_zip(job), "application/zip"
+    if kind == "pdfzip":
+        return plates_pdf_zip(job), "application/zip"
+    return layered_svg(job).encode("utf-8"), "image/svg+xml"
 
 
 def _scores(svg, prep) -> dict:
@@ -232,14 +230,11 @@ def _scores(svg, prep) -> dict:
 
 def design_response(engine: "Engine", req: dict) -> dict:
     """The design on its own (no page, no marks) in its ink colours, at full quality, plus its real size in mm."""
-    if isinstance(req.get("params"), dict):
-        req = {**req, "params": {**req["params"], "draft": False}}
-    with engine.lock:
-        job = _plate_job(engine, req.get("tool", ""), req["id"], req)
-        if not job.plates:
-            raise ValueError("Nothing to save: no plates were produced.")
-        return {"svg": compose(job, "design"), "width_mm": job.art[2], "height_mm": job.art[3],
-                "garment": job.info.get("garment", "")}
+    job = _file_job(engine, req)
+    if not job.plates:
+        raise ValueError("Nothing to save: no plates were produced.")
+    return {"svg": compose(job, "design"), "width_mm": job.art[2], "height_mm": job.art[3],
+            "garment": job.info.get("garment", "")}
 
 
 def make_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:

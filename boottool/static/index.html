@@ -606,18 +606,36 @@ async function addFiles(files) {
   }
   if (bad) toast(`${bad} file${bad > 1 ? "s" : ""} could not be read as images and were skipped.`);
 }
+async function post(url, data, signal) {              // sends it as JSON; an answer that is not OK is thrown, in the server's words
+  const r = await fetch(url, {method: "POST", signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+  if (!r.ok) throw new Error((await r.json()).error);
+  return r;
+}
+const ask = async (url, data) => (await post(url, data)).json();
+async function saveFile(r, name) { const u = URL.createObjectURL(await r.blob()), a = document.createElement("a"); a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000); }
+const making = {};                                    // the downloads that take a while and are being made now: "PDF", "films"
+async function slowFile(what, url, data, name) {      // one at a time: a second click must not start it again
+  if (making[what]) return toast(`Still making the ${what}…`);
+  making[what] = true; toast(`Making the ${what}…`);
+  const note = setInterval(() => toast(`Still making the ${what}…`), 5000);   // (a note goes away after 6 seconds)
+  try { await saveFile(await post(url, data), name); toast(`${what[0].toUpperCase() + what.slice(1)} downloaded.`); }
+  catch (e) { toast(e.message); }
+  finally { clearInterval(note); making[what] = false; }
+}
 let inksFor = "";                                     // the picture that Print's inks and Levels were last set up for
+function onScreen(id, w, h, name, img) {              // another picture is the one worked on: what is shown and saved so far is the one before's
+  imageId = id; natW = w; natH = h; lastRes = null; lastShown = null; stageKey = ""; $("#dl").disabled = true;
+  libName = LIB.files[id] || ""; fileName = libName ? libName.replace(/\.svg$/i, "") : LIB.rename[id] || name.replace(/\.[^.]+$/, "");   // under the name it was given since
+  if (id !== inksFor) {                               // Print starts afresh for it: picked inks belong to the picture they were picked from
+    inksFor = id; const o = P.print; o.colors = []; o.names = []; o.angles_s = []; o.picked = false; eyeOff();
+    if (img) { IMG = img; [o.lv_black, o.lv_gamma, o.lv_white] = IMG.tonal ? IMG.auto : [0, 1, 255]; }   // its own Levels and histogram
+  }
+  $("#empty").style.display = "none"; $("#stage").style.display = "block";
+}
 function viewItem(i) {
   const it = BATCH.items[i]; if (!it) return;
-  BATCH.sel = i; bindConvert(); imageId = it.id; natW = it.w; natH = it.h; fileName = it.name.replace(/\.[^.]+$/, ""); lastRes = null; stageKey = "";
-  libName = LIB.files[it.id] || ""; $("#dl").disabled = true; lastShown = null;   // its own library item; the result on screen is the picture before's
-  fileName = libName ? libName.replace(/\.svg$/i, "") : LIB.rename[it.id] || fileName;   // under the name it was given since
-  ownUrl = false; origURL = it.url; $("#orig").src = it.url;
-  setName(fileName, `· ${it.w}×${it.h}`); $("#empty").style.display = "none"; $("#stage").style.display = "block";
-  if (it.id !== inksFor) {                             // another picture: Print starts afresh for it, as in load
-    inksFor = it.id; const o = P.print; o.colors = []; o.names = []; o.angles_s = []; o.picked = false; eyeOff();
-    if (it.img) { IMG = it.img; [o.lv_black, o.lv_gamma, o.lv_white] = IMG.tonal ? IMG.auto : [0, 1, 255]; }   // its own Levels and histogram
-  }
+  BATCH.sel = i; bindConvert(); onScreen(it.id, it.w, it.h, it.name, it.img);
+  ownUrl = false; origURL = it.url; $("#orig").src = it.url; setName(fileName, `· ${it.w}×${it.h}`);
   setMode("svg"); renderSide(); run();
 }
 const batchRunning = () => BATCH.job && BATCH.status && !BATCH.status.finished;
@@ -707,8 +725,7 @@ async function startBatch() {
   try {
     const items = BATCH.items.map(it => ({id: it.id, name: it.name, params: BATCH.per && it.own ? it.own : SHARED}));
     const sent = BATCH.items.slice();
-    const r = await fetch("/api/batch/start", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({items, out_dir: BATCH.outDir.trim(), keep_going: BATCH.keepGoing})});
-    const j = await r.json(); if (!r.ok) throw new Error(j.error);
+    const j = await ask("/api/batch/start", {items, out_dir: BATCH.outDir.trim(), keep_going: BATCH.keepGoing});
     BATCH.job = j.job; BATCH.status = {finished: false, counts: {done: 0, error: 0, stopped: 0}, items: items.map(() => ({state: "queued"})), out_dir: j.out_dir};
     BATCH.items.forEach(it => { delete it.j; }); sent.forEach((it, i) => { it.j = i; });   // each row remembers which picture of this batch it is
     renderBatch(); pollBatch();
@@ -729,7 +746,7 @@ function pollBatch(missed = 0) {
     }
   }, 600);
 }
-async function stopBatch() { if (!BATCH.job) return; try { await fetch("/api/batch/stop", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({job: BATCH.job})}); } catch (e) {} }
+async function stopBatch() { if (!BATCH.job) return; try { await post("/api/batch/stop", {job: BATCH.job}); } catch (e) {} }
 
 const gv = k => (k in P.print ? P.print[k] : 0);
 function levelsBox() {
@@ -843,7 +860,7 @@ const pageBoxes = () => [
   downloadBox().build(),
   filmBox().build(),
 ];
-let filmDpi = 600, filmBusy = false;
+let filmDpi = 600;
 function filmBox() {                                  // the plates as pictures, for film printers that do not take SVG
   return {build: () => {
     const b = el("div", "box"); b.style.borderBottom = "0"; b.append(el("div", "bh", "Films as pictures"));
@@ -855,19 +872,8 @@ function filmBox() {                                  // the plates as pictures,
     p.onclick = () => dlFilms("png"); t.onclick = () => dlFilms("tiff"); b.append(s, p, t); return b;
   }};
 }
-async function dlFilms(format) {
-  if (!imageId) return;
-  if (filmBusy) return toast("Still making the films…");               // one at a time: a second click must not start it again
-  const name = `${fileName}-${tool}-films-${filmDpi}dpi-${format}.zip`;  // named now: another picture may be open by the time it arrives
-  filmBusy = true; toast("Making the films…");
-  const note = setInterval(() => toast("Still making the films…"), 5000);   // fine films take a while, and a note goes away after 6 seconds
-  try {
-    const r = await fetch("/api/films", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...payload(0), format, dpi: filmDpi})});
-    if (!r.ok) { const j = await r.json(); throw new Error(j.error); }
-    const u = URL.createObjectURL(await r.blob()), a = document.createElement("a"); a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
-    toast("Films downloaded.");
-  } catch (e) { toast(e.message); }
-  finally { clearInterval(note); filmBusy = false; }
+function dlFilms(format) {                            // (named now: another picture may be open by the time it arrives)
+  if (imageId) slowFile("films", "/api/films", {...payload(0), format, dpi: filmDpi}, `${fileName}-${tool}-films-${filmDpi}dpi-${format}.zip`);
 }
 
 const TOOLS = {
@@ -1026,13 +1032,10 @@ async function load(file, to) {
   try {
     await READY;                                                            // (the settings first: see "boot")
     const r = await fetch("/api/upload", {method: "POST", body: file}), j = await r.json(); if (!r.ok) throw new Error(j.error);
-    IMG = {hist: j.hist || null, auto: j.auto || [0, 1, 255], tonal: !!j.tonal};
-    const lv = IMG.tonal ? IMG.auto : [0, 1, 255]; [P.print.lv_black, P.print.lv_gamma, P.print.lv_white] = lv; P.print.colors = []; P.print.names = []; P.print.angles_s = [];
-    P.print.picked = false; eyeOff(); inksFor = j.id;                         // picked inks belong to the picture they were picked from
     BATCH.sel = -1; bindConvert();
-    libName = ""; $("#dl").disabled = true; lastShown = null; imageId = j.id; natW = j.width; natH = j.height; fileName = file.name.replace(/\.[^.]+$/, ""); lastRes = null; lastPalette = []; plateView = "all"; stageKey = "";
+    onScreen(j.id, j.width, j.height, file.name, {hist: j.hist || null, auto: j.auto || [0, 1, 255], tonal: !!j.tonal}); lastPalette = []; plateView = "all";
     if (origURL && ownUrl) URL.revokeObjectURL(origURL); origURL = URL.createObjectURL(file); ownUrl = true; $("#orig").src = origURL;
-    setName(fileName, `.${(file.name.match(/\.([^.]+)$/) || [0, "png"])[1]} · ${natW}×${natH}`); $("#empty").style.display = "none"; $("#stage").style.display = "block";
+    setName(fileName, `.${(file.name.match(/\.([^.]+)$/) || [0, "png"])[1]} · ${natW}×${natH}`);
     if (to) setTool(to); else if (tool === "help" || tool === "compose") setTool("convert"); else { if (mode === "batch") setMode("svg"); if (tool === "print") renderSide(); renderTabs(); run(); }
   } catch (e) { toast(e.message); }
 }
@@ -1061,9 +1064,9 @@ async function run() {
   const my = ++seq; if (ctrl) ctrl.abort(); ctrl = new AbortController(); $("#busy").style.display = "block";
   const t0 = tool;
   try {
-    const r = await fetch(tool === "convert" ? "/api/trace" : "/api/plates", {method: "POST", signal: ctrl.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload(my))});
+    const r = await post(tool === "convert" ? "/api/trace" : "/api/plates", payload(my), ctrl.signal);
     if (r.status === 204) return;
-    const j = await r.json(); if (!r.ok) throw new Error(j.error); if (my !== seq || t0 !== tool) return;
+    const j = await r.json(); if (my !== seq || t0 !== tool) return;
     show(j);
   } catch (e) { if (e.name !== "AbortError") toast(e.message); }
   finally { if (my === seq) $("#busy").style.display = "none"; }
@@ -1093,8 +1096,7 @@ function libIs(id, name) {                           // picture id's library ite
 }
 async function renameInLibrary(to, id = imageId) {   // the picture's library item takes the new name; its graphic is left as it is
   try {
-    const r = await fetch("/api/library/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: LIB.files[id], to})});
-    const j = await r.json(); if (!r.ok) throw new Error(j.error); libIs(id, j.name);
+    libIs(id, (await ask("/api/library/rename", {name: LIB.files[id], to})).name);
   } catch (e) { libIs(id, ""); }                      // removed from the library meanwhile: the next result is saved under the new name
 }
 function saveToLibrary() {
@@ -1103,8 +1105,7 @@ function saveToLibrary() {
   LIB.timers[id] = setTimeout(async () => {
     if (LIB.rename[id]) { name = LIB.rename[id]; delete LIB.rename[id]; }
     try {
-      const r = await fetch("/api/library/save", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, svg, key: session + ":" + id})});
-      const j = await r.json(); if (!r.ok) throw new Error(j.error); libIs(id, j.name);
+      libIs(id, (await ask("/api/library/save", {name, svg, key: session + ":" + id})).name);
       if (LIB.rename[id]) { const to = LIB.rename[id]; delete LIB.rename[id]; renameInLibrary(to, id); }   // renamed while this was on its way
     } catch (e) { const c = $("#libcell"); if (c && id === imageId) c.textContent = "Not saved: " + e.message; }
   }, 1500);
@@ -1132,40 +1133,23 @@ async function saveToPrintLibrary() {
   if (!imageId || !lastRes) return;
   try {
     toast("Saving to the Print library…");
-    const r = await fetch("/api/design", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload(0))}), j = await r.json();
-    if (!r.ok) throw new Error(j.error);
+    const j = await ask("/api/design", payload(0));
     const ppi = Math.min(200, Math.sqrt(25e6 / (j.width_mm / 25.4 * j.height_mm / 25.4))), pw = Math.max(1, Math.round(j.width_mm / 25.4 * ppi)), ph = Math.max(1, Math.round(j.height_mm / 25.4 * ppi));
     const svg = j.svg.replace(/width="[^"]*mm" height="[^"]*mm"/, `width="${pw}" height="${ph}"`);
     const u = URL.createObjectURL(new Blob([svg], {type: "image/svg+xml"})), im = new Image(); im.src = u; await im.decode();
     const c = document.createElement("canvas"); c.width = pw; c.height = ph; c.getContext("2d").drawImage(im, 0, 0, pw, ph); URL.revokeObjectURL(u);
     const png = c.toDataURL("image/png");
-    const r2 = await fetch("/api/prints/save", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: fileName || "print", png, width_mm: j.width_mm, height_mm: j.height_mm, garment: j.garment || ""})}), k = await r2.json();
-    if (!r2.ok) throw new Error(k.error);
+    const k = await ask("/api/prints/save", {name: fileName || "print", png, width_mm: j.width_mm, height_mm: j.height_mm, garment: j.garment || ""});
     toast(`Saved as ${k.name}. Find it in Simulate › Libraries › Print.`);
   } catch (e) { toast("Not saved: " + e.message); }
 }
-let pdfBusy = false;
-async function dlPdf(kind) {                          // "pdf": one file, a page per plate; "pdfzip": a .zip with one PDF per plate
-  if (!imageId) return;
-  if (pdfBusy) return toast("Still making the PDF…");                  // one at a time: a second click must not start it again
-  const name = `${fileName}-${tool}-${kind === "pdf" ? "plates.pdf" : "plates-pdf.zip"}`;   // named now: another picture may be open by the time it arrives
-  pdfBusy = true; toast("Making the PDF…");
-  const note = setInterval(() => toast("Still making the PDF…"), 5000);   // big halftones take a while, and a note goes away after 6 seconds
-  try {
-    const r = await fetch("/api/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...payload(0), kind})});
-    if (!r.ok) { const j = await r.json(); throw new Error(j.error); }
-    const u = URL.createObjectURL(await r.blob()), a = document.createElement("a"); a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
-    toast("PDF downloaded.");
-  } catch (e) { toast(e.message); }
-  finally { clearInterval(note); pdfBusy = false; }
+function dlPdf(kind) {                                // "pdf": one file, a page per plate; "pdfzip": a .zip with one PDF per plate
+  if (imageId) slowFile("PDF", "/api/download", {...payload(0), kind}, `${fileName}-${tool}-${kind === "pdf" ? "plates.pdf" : "plates-pdf.zip"}`);
 }
 async function dl(kind) {
   if (!imageId) return;
-  try {
-    const r = await fetch("/api/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...payload(0), kind})});
-    if (!r.ok) { const j = await r.json(); throw new Error(j.error); }
-    const u = URL.createObjectURL(await r.blob()), a = document.createElement("a"); a.href = u; a.download = `${fileName}-${tool}-${kind === "zip" ? "plates.zip" : "layered.svg"}`; a.click(); setTimeout(() => URL.revokeObjectURL(u), 4000);
-  } catch (e) { toast(e.message); }
+  try { await saveFile(await post("/api/download", {...payload(0), kind}), `${fileName}-${tool}-${kind === "zip" ? "plates.zip" : "layered.svg"}`); }
+  catch (e) { toast(e.message); }
 }
 $("#dl").onclick = () => { const a = document.createElement("a"); a.href = svgURL; a.download = fileName + ".svg"; a.click(); };
 
