@@ -422,8 +422,19 @@ def _design_region(dark: np.ndarray, mm_px: float, outline_mm: float) -> np.ndar
 
 
 def _underbase_mask(printed: np.ndarray, mm_px: float) -> np.ndarray:
-    """Solid shape under everything that prints, pulled in a little so white never peeks out."""
+    """Solid shape under everything that prints, pulled in a little so white never peeks out.
+
+    The pulling in is done in whole pixels, never less than one. In a small picture one pixel can be
+    a millimetre or more on the page, so a line two pixels thick lost all its white. Where pixels
+    are that big the shape is drawn finer first (about eight to the millimetre), and what comes
+    back is that finer picture."""
     m = (printed > 0.03).astype(np.uint8)
+    if mm_px > 0.3:
+        h, w = m.shape
+        finer = min(int(round(mm_px / 0.125)), int((25e6 / (w * h)) ** 0.5))      # (not past 25 million pixels)
+        if finer > 1:
+            m = (cv2.resize(m * 255, (w * finer, h * finer), interpolation=cv2.INTER_LINEAR) > 127).astype(np.uint8)
+            mm_px /= finer
     k = max(1, int(round(0.8 / mm_px)))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
     e = max(1, int(round(0.25 / mm_px)))
@@ -528,7 +539,7 @@ def _flat(rgb: np.ndarray, p: PrintParams, page: PageOpts) -> Job:
             gar = np.median(border, axis=0).astype(np.uint8)                       # the design's own paper
             printed = (np.abs(rgb.astype(np.int16) - gar.astype(np.int16)).sum(2) > 24).astype(np.float32)
             ub = _underbase_mask(printed, mm_px)
-            two = np.empty_like(rgb); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)
+            two = np.empty(ub.shape + (3,), np.uint8); two[:] = gar if int(gar.sum()) > 40 else 255; two[ub > 0.5] = (0, 0, 0)   # (ub may be finer than the picture)
             f2 = os.path.join(td, "under.png")
             Image.fromarray(two).save(f2)
             ju = sep.build(f2, sep.SepParams(inks=1, paper=True, trap=0.0, speckle=p.speckle, smooth=p.smooth), page)
